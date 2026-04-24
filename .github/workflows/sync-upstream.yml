@@ -1,0 +1,27 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '*/10 * * * *' # 每 30 分钟检查一次上游更新
+  workflow_dispatch:      # 允许你在 Actions 页面手动点击按钮运行
+
+jobs:
+  sync_latest_from_upstream:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 检出你自己的仓库代码
+      - name: Checkout target repo
+        uses: actions/checkout@v3
+        with:
+          ref: main       # 你的分支名是 master
+          fetch-depth: 0
+
+      # 2. 运行同步插件
+      - name: Sync upstream changes
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
+        with:
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          upstream_sync_repo: DarkLink/QuantPits  # 原作者仓库
+          upstream_sync_branch: main             # 上游分支名
+          target_sync_branch: main               # 你的分支名
+          test_mode: false                         # 正式运行模式
