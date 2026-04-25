@@ -4,7 +4,10 @@ on:
   schedule:
     - cron: '*/10 * * * *' # 每 30 分钟检查一次上游更新
   workflow_dispatch:      # 允许你在 Actions 页面手动点击按钮运行
-
+  
+permissions:
+  contents: write
+  
 jobs:
   sync_latest_from_upstream:
     runs-on: ubuntu-latest
