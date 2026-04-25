@@ -36,96 +36,73 @@ class MarketRegimeAgent(BaseAgent):
                                 [], {})
 
         # --- Trend Detection ---
-        ma20 = bench.rolling(20).mean()
-        ma60 = bench.rolling(60).mean() if len(bench) >= 60 else pd.Series(dtype=float)
+        period_return = bench.iloc[-1] / bench.iloc[0] - 1 if bench.iloc[0] != 0 else 0.0
 
-        # Current values
-        curr_price = bench.iloc[-1]
-        curr_ma20 = ma20.iloc[-1] if not ma20.empty else np.nan
-        curr_ma60 = ma60.iloc[-1] if not ma60.empty and not np.isnan(ma60.iloc[-1]) else np.nan
-
-        # Linear regression slope on last 60 days (or all available)
-        lookback = min(60, len(bench))
-        y = bench.iloc[-lookback:].values
-        x = np.arange(lookback)
+        # Linear regression slope on all available data in the window
+        lookback = len(bench)
+        y = np.array(bench.values, dtype=float)
+        x = np.arange(lookback, dtype=float)
         slope = np.polyfit(x, y, 1)[0] if lookback > 1 else 0
-        slope_pct = slope / bench.iloc[-lookback] * 100  # as % of starting price
+        slope_pct = slope / bench.iloc[0] * 100 * 252 if bench.iloc[0] != 0 else 0.0 # Annualized slope %
 
-        raw_metrics['current_price'] = float(curr_price)
-        raw_metrics['ma20'] = float(curr_ma20) if not np.isnan(curr_ma20) else None
-        raw_metrics['ma60'] = float(curr_ma60) if curr_ma60 and not np.isnan(curr_ma60) else None
-        raw_metrics['trend_slope_pct_per_day'] = float(slope_pct)
+        raw_metrics['current_price'] = float(bench.iloc[-1])
+        raw_metrics['period_return'] = float(period_return)
+        raw_metrics['annualized_slope_pct'] = float(slope_pct)
 
-        # MA crossover state
-        if not np.isnan(curr_ma20) and curr_ma60 and not np.isnan(curr_ma60):
-            if curr_ma20 > curr_ma60 and curr_price > curr_ma20:
-                trend_label = "Bullish"
-            elif curr_ma20 < curr_ma60 and curr_price < curr_ma20:
-                trend_label = "Bearish"
-            else:
-                trend_label = "Sideways"
-        elif not np.isnan(curr_ma20):
-            trend_label = "Bullish" if curr_price > curr_ma20 else "Bearish"
+        if period_return > 0.05:
+            trend_label = "Bullish"
+        elif period_return < -0.05:
+            trend_label = "Bearish"
         else:
-            trend_label = "Unknown"
+            trend_label = "Sideways"
 
         raw_metrics['trend_label'] = trend_label
 
         # --- Volatility Regime ---
         daily_ret = bench.pct_change().dropna()
-        vol_20d = daily_ret.iloc[-20:].std() * np.sqrt(252) if len(daily_ret) >= 20 else np.nan
+        window_vol = daily_ret.std() * np.sqrt(252) if len(daily_ret) >= 5 else 0.0
 
-        # Historical percentile (use all available data)
-        if len(daily_ret) >= 60:
-            rolling_vol = daily_ret.rolling(20).std() * np.sqrt(252)
-            rolling_vol = rolling_vol.dropna()
-            if len(rolling_vol) > 0 and not np.isnan(vol_20d):
-                vol_percentile = float((rolling_vol < vol_20d).mean() * 100)
-            else:
-                vol_percentile = 50.0
+        raw_metrics['window_volatility'] = float(window_vol)
+
+        if window_vol > 0.20:
+            vol_label = "High-Vol"
+        elif window_vol < 0.12:
+            vol_label = "Low-Vol"
         else:
-            vol_percentile = 50.0
-
-        raw_metrics['volatility_20d'] = float(vol_20d) if not np.isnan(vol_20d) else None
-        raw_metrics['volatility_percentile'] = vol_percentile
-
-        if vol_percentile > 80:
-            vol_label = "High-Volatility"
-            findings.append(self._make_finding(
-                'warning', 'Elevated market volatility',
-                f'20-day annualized volatility ({vol_20d*100:.1f}%) is at the '
-                f'{vol_percentile:.0f}th percentile of historical distribution.',
-                {'vol_20d': vol_20d, 'percentile': vol_percentile}
-            ))
-        elif vol_percentile < 20:
-            vol_label = "Low-Volatility"
-        else:
-            vol_label = "Normal"
+            vol_label = "Normal-Vol"
 
         raw_metrics['volatility_label'] = vol_label
+
+        if window_vol > 0.20:
+            findings.append(self._make_finding(
+                'warning', 'Elevated market volatility',
+                f'Annualized volatility for this window is {window_vol*100:.1f}%.',
+                {'window_volatility': window_vol}
+            ))
 
         # --- Drawdown State ---
         cum_ret = (1 + daily_ret).cumprod()
         rolling_max = cum_ret.cummax()
-        drawdown = (cum_ret / rolling_max - 1)
-        current_dd = float(drawdown.iloc[-1])
+        # Ensure we don't divide by zero
+        drawdown = (cum_ret / rolling_max - 1) if not rolling_max.empty else pd.Series([0.0])
+        current_dd = float(drawdown.iloc[-1]) if not drawdown.empty else 0.0
+        max_dd = float(drawdown.min()) if not drawdown.empty else 0.0
 
         # Underwater duration
-        if current_dd < -0.001:
-            # Find when drawdown started
+        if current_dd < -0.001 and not cum_ret.empty:
             peak_idx = cum_ret.idxmax()
             underwater_days = (bench.index[-1] - peak_idx).days
         else:
             underwater_days = 0
 
         raw_metrics['current_drawdown'] = current_dd
-        raw_metrics['max_drawdown'] = float(drawdown.min())
+        raw_metrics['max_drawdown'] = max_dd
         raw_metrics['underwater_days'] = underwater_days
 
         if current_dd < -0.10:
             findings.append(self._make_finding(
                 'critical', 'Deep market drawdown',
-                f'CSI300 is {current_dd*100:.1f}% below peak, '
+                f'CSI300 is {current_dd*100:.1f}% below peak within window, '
                 f'underwater for {underwater_days} days.',
                 {'drawdown': current_dd, 'underwater_days': underwater_days}
             ))
@@ -135,22 +112,22 @@ class MarketRegimeAgent(BaseAgent):
         elif current_dd < -0.05:
             findings.append(self._make_finding(
                 'warning', 'Moderate market drawdown',
-                f'CSI300 is {current_dd*100:.1f}% below peak.',
+                f'CSI300 is {current_dd*100:.1f}% below window peak.',
                 {'drawdown': current_dd}
             ))
 
         # --- Regime Summary ---
         regime = trend_label
-        if vol_label == "High-Volatility":
+        if vol_label == "High-Vol":
             regime = f"High-Vol {trend_label}"
 
         raw_metrics['regime'] = regime
 
         findings.append(self._make_finding(
             'info', f'Market regime: {regime}',
-            f'Trend: {trend_label} (slope: {slope_pct:.3f}%/day). '
-            f'Volatility: {vol_label} ({vol_percentile:.0f}th pctile). '
-            f'Drawdown: {current_dd*100:.1f}%.',
+            f'Period Return: {period_return*100:.2f}%. '
+            f'Volatility: {window_vol*100:.1f}%. '
+            f'Max Drawdown: {max_dd*100:.1f}%.',
             raw_metrics
         ))
 

@@ -72,15 +72,17 @@ class ReportGenerator:
         for af in findings:
             lines.append(f"\n### Window: {af.window_label}")
             regime = af.raw_metrics.get('regime', 'Unknown')
-            vol = af.raw_metrics.get('volatility_20d')
-            vol_pct = af.raw_metrics.get('volatility_percentile', 0)
-            dd = af.raw_metrics.get('current_drawdown', 0)
+            period_ret = af.raw_metrics.get('period_return')
+            window_vol = af.raw_metrics.get('window_volatility')
+            max_dd = af.raw_metrics.get('max_drawdown', 0)
+            curr_dd = af.raw_metrics.get('current_drawdown', 0)
 
             lines.append(f"- **Regime:** {regime}")
-            if vol:
-                lines.append(f"- **20d Volatility:** {vol*100:.1f}% "
-                           f"({vol_pct:.0f}th percentile)")
-            lines.append(f"- **Current Drawdown:** {dd*100:.1f}%")
+            if period_ret is not None:
+                lines.append(f"- **Period Return:** {period_ret*100:.2f}%")
+            if window_vol is not None:
+                lines.append(f"- **Annualized Volatility:** {window_vol*100:.1f}%")
+            lines.append(f"- **Max Drawdown:** {max_dd*100:.1f}% (Current: {curr_dd*100:.1f}%)")
 
         return "\n".join(lines)
 

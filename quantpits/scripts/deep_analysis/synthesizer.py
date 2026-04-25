@@ -298,10 +298,12 @@ class Synthesizer:
                 })
 
         # Deduplicate and sort
+        import re
         seen = set()
         unique_recs = []
         for r in recs:
-            key = r['text'][:80]
+            # Remove details in parentheses to deduplicate variations
+            key = re.sub(r'\(.*?\)', '', r['text']).strip()
             if key not in seen:
                 seen.add(key)
                 unique_recs.append(r)

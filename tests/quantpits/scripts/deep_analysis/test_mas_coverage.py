@@ -351,6 +351,23 @@ def test_market_regime_agent_edge_cases(mock_analysis_context):
     assert any('volatility' in t.lower() for t in titles), f"Volatility finding not found in {titles}"
     assert any('drawdown' in t.lower() for t in titles), f"Drawdown finding not found in {titles}"
 
+def test_portfolio_risk_empty_data():
+    from quantpits.scripts.deep_analysis.agents.portfolio_risk import PortfolioRiskAgent
+    import pandas as pd
+    agent = PortfolioRiskAgent()
+    ctx = MagicMock()
+    ctx.daily_amount_df = pd.DataFrame()
+    findings = agent.analyze(ctx)
+    assert any('No portfolio data' in f.title for f in findings.findings)
+
+def test_portfolio_risk_init_error(mock_analysis_context):
+    from quantpits.scripts.deep_analysis.agents.portfolio_risk import PortfolioRiskAgent
+    agent = PortfolioRiskAgent()
+    with patch("quantpits.scripts.analysis.portfolio_analyzer.PortfolioAnalyzer", side_effect=Exception("Init Error")), \
+         patch('quantpits.scripts.analysis.utils.init_qlib'):
+        findings = agent.analyze(mock_analysis_context)
+        assert findings.raw_metrics.get('error') == "Init Error"
+
 def test_portfolio_risk_agent_edge_cases(mock_analysis_context):
     from quantpits.scripts.deep_analysis.agents.portfolio_risk import PortfolioRiskAgent
     agent = PortfolioRiskAgent()
@@ -365,30 +382,338 @@ def test_portfolio_risk_agent_edge_cases(mock_analysis_context):
         findings = agent.analyze(mock_analysis_context)
         assert findings.agent_name == "Portfolio Risk"
 
-# def test_model_health_agent_edge_cases(mock_analysis_context):
-#     from quantpits.scripts.deep_analysis.agents.model_health import ModelHealthAgent
-#     agent = ModelHealthAgent()
+def test_portfolio_risk_metrics_warnings(mock_analysis_context):
+    from quantpits.scripts.deep_analysis.agents.portfolio_risk import PortfolioRiskAgent
+    agent = PortfolioRiskAgent()
     
-#     # 1. No performance files
-#     ctx_empty = MagicMock()
-#     ctx_empty.model_performance_files = []
-#     findings = agent.analyze(ctx_empty)
-#     assert findings.agent_name == "Model Health"
-#     assert any('No model performance logs' in f.title for f in findings.findings)
+    trad_metrics = {
+        'CAGR_252': 0.1, 'Sharpe': 1.0, 'Max_Drawdown': -0.2, # < -0.15
+        'Calmar': 0.5, 'Excess_Return_CAGR_252': -0.1, # < -0.05
+        'Sortino': 1.0
+    }
+    factor_metrics = {
+        'Beta_Market': 1.5, # abs(beta - 1.0) > 0.3
+        'Annualized_Alpha': 0.05, 'Annualized_Alpha_t': 1.0, 'Annualized_Alpha_p': 0.2, # > 0.1
+        'Beta_Market_t': 2.0, 'Beta_Market_p': 0.01, 'R_Squared': 0.5
+    }
+    style_metrics = {
+        'Multi_Factor_Intercept': 0.01, 'Multi_Factor_Intercept_t': 1.0, 'Multi_Factor_Intercept_p': 0.05,
+        'Barra_Liquidity_Exp_(High-Low)': 0.5, # abs > 0.3
+        'Barra_Momentum_Exp_(High-Low)': 0.0, 'Barra_Volatility_Exp_(High-Low)': 0.0
+    }
+    holding_metrics = {
+        'Avg_Daily_Holdings_Count': 100, 'Avg_Top1_Concentration': 0.2, # > 0.15
+        'Daily_Holding_Win_Rate': 0.5
+    }
     
-#     # 2. Declining IC
-#     with patch('json.load') as mock_json, patch('builtins.open', MagicMock()):
-#         # Mock 3 snapshots with declining IC
-#         mock_json.side_effect = [
-#             {'all': {'IC_Mean': 0.10, 'ICIR': 1.0}},
-#             {'all': {'IC_Mean': 0.05, 'ICIR': 0.5}},
-#             {'all': {'IC_Mean': 0.01, 'ICIR': 0.1}}
-#         ]
+    with patch("quantpits.scripts.analysis.portfolio_analyzer.PortfolioAnalyzer") as MockPA, \
+         patch('quantpits.scripts.analysis.utils.init_qlib'):
+        mock_pa = MockPA.return_value
+        mock_pa.calculate_traditional_metrics.return_value = trad_metrics
+        mock_pa.calculate_factor_exposure.return_value = factor_metrics
+        mock_pa.calculate_style_exposures.return_value = style_metrics
+        mock_pa.calculate_holding_metrics.return_value = holding_metrics
         
-#         ctx_decl = MagicMock()
-#         ctx_decl.model_performance_files = ['f1.json', 'f2.json', 'f3.json']
-#         ctx_decl.window_label = 'full'
-#         ctx_decl.workspace_root = mock_analysis_context.workspace_root
+        findings = agent.analyze(mock_analysis_context)
+        titles = [f.title for f in findings.findings]
         
-#         findings = agent.analyze(ctx_decl)
-#         assert any('declining' in f.title.lower() for f in findings.findings)
+        assert any("Underperforming benchmark" in t for t in titles)
+        assert any("Severe drawdown" in t for t in titles)
+        assert any("Alpha not statistically significant" in t for t in titles)
+        assert any("over-exposed" in t for t in titles)
+        assert any("Extreme liquidity exposure" in t for t in titles)
+        assert any("High concentration risk" in t for t in titles)
+
+def test_portfolio_risk_metrics_errors(mock_analysis_context):
+    from quantpits.scripts.deep_analysis.agents.portfolio_risk import PortfolioRiskAgent
+    agent = PortfolioRiskAgent()
+    
+    with patch("quantpits.scripts.analysis.portfolio_analyzer.PortfolioAnalyzer") as MockPA, \
+         patch('quantpits.scripts.analysis.utils.init_qlib'):
+        mock_pa = MockPA.return_value
+        mock_pa.calculate_traditional_metrics.side_effect = Exception("Trad Error")
+        mock_pa.calculate_factor_exposure.side_effect = Exception("Factor Error")
+        mock_pa.calculate_style_exposures.side_effect = Exception("Style Error")
+        mock_pa.calculate_holding_metrics.side_effect = Exception("Holding Error")
+        
+        findings = agent.analyze(mock_analysis_context)
+        
+        assert findings.raw_metrics.get('traditional_error') == "Trad Error"
+        assert findings.raw_metrics.get('factor_error') == "Factor Error"
+        assert findings.raw_metrics.get('style_error') == "Style Error"
+        assert findings.raw_metrics.get('holding_error') == "Holding Error"
+
+def test_model_health_agent_comprehensive(mock_analysis_context, tmp_path):
+    from quantpits.scripts.deep_analysis.agents.model_health import ModelHealthAgent
+    agent = ModelHealthAgent()
+    
+    # 1. No performance data (lines 31-34)
+    ctx_empty = MagicMock()
+    ctx_empty.model_performance_files = []
+    ctx_empty.window_label = 'full'
+    findings = agent.analyze(ctx_empty)
+    assert any('No model performance data' in f.title for f in findings.findings)
+
+    # 2. Setup mock data
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    
+    # invalid date (line 185)
+    f_invalid_date = ws / "model_performance_invalid.json"
+    f_invalid_date.write_text("{}")
+    
+    # invalid json (lines 189-190)
+    f_invalid_json = ws / "model_performance_2026-01-01.json"
+    f_invalid_json.write_text("{invalid")
+    
+    # 3. Model with < 2 snapshots (lines 44-50)
+    # Model with std=0, slope=0 (line 65, 72)
+    # Model with improving trend (line 68)
+    # Model with negative IC (lines 93-104)
+    # Model with stable trend but IC mean < 0.02 (lines 276-277)
+    # Check retrains and predict_only (lines 118-119, 223-235, 244, 247, 265)
+    
+    f1 = ws / "model_performance_2026-01-02.json"
+    f1.write_text(json.dumps({
+        "model_short": {"IC_Mean": 0.05, "ICIR": 0.5, "record_id": "r1"},
+        "model_flat": {"IC_Mean": 0.05, "ICIR": 0.5, "record_id": "r2"},
+        "model_improving": {"IC_Mean": -0.01, "ICIR": -0.1, "record_id": "r3"},
+        "model_negative": {"IC_Mean": -0.05, "ICIR": -0.5, "record_id": "r4"},
+        "model_stable": {"IC_Mean": 0.01, "ICIR": 0.1, "record_id": "r5"},
+        "model_top": {"IC_Mean": 0.10, "ICIR": 1.0, "record_id": "r6"}
+    }))
+    
+    f2 = ws / "model_performance_2026-01-03.json"
+    f2.write_text(json.dumps({
+        "model_flat": {"IC_Mean": 0.05, "ICIR": 0.5, "record_id": "r2_new"},
+        "model_improving": {"IC_Mean": 0.01, "ICIR": 0.1, "record_id": "r3"},
+        "model_negative": {"IC_Mean": -0.06, "ICIR": -0.6, "record_id": "r4_new"},
+        "model_stable": {"IC_Mean": 0.012, "ICIR": 0.12, "record_id": "r5"},
+        "model_top": {"IC_Mean": 0.11, "ICIR": 1.1, "record_id": "r6_predict"}
+    }))
+
+    f3 = ws / "model_performance_2026-01-04.json"
+    f3.write_text(json.dumps({
+        "model_flat": {"IC_Mean": 0.05, "ICIR": 0.5, "record_id": "r2_new"},
+        "model_improving": {"IC_Mean": 0.05, "ICIR": 0.5, "record_id": "r3"},
+        "model_negative": {"IC_Mean": -0.055, "ICIR": -0.55, "record_id": "r4_new"},
+        "model_stable": {"IC_Mean": 0.009, "ICIR": 0.09, "record_id": "r5"},
+        "model_top": {"IC_Mean": 0.12, "ICIR": 1.2, "record_id": "r6_predict2"}
+    }))
+    
+    # 4. Mock mlruns for predict_only tag
+    mlruns = ws / "mlruns"
+    mlruns.mkdir()
+    def make_mlrun(rid, mode):
+        (mlruns / "0" / rid / "tags").mkdir(parents=True)
+        (mlruns / "0" / rid / "tags" / "mode").write_text(mode)
+    
+    make_mlrun("r6_predict", "predict_only")
+    make_mlrun("r6_predict2", "predict_only")
+    make_mlrun("r2_new", "train")
+    
+    # 5. Mock config files (lines 299, 305-306)
+    config_dir = ws / "config"
+    config_dir.mkdir()
+    
+    bad_yaml = config_dir / "workflow_config_bad.yaml"
+    bad_yaml.write_text("invalid: [yaml")
+    
+    good_yaml = config_dir / "workflow_config_m1.yaml"
+    good_yaml.write_text(yaml.dump({
+        "task": {"model": {"class": "LGBModel", "kwargs": {"learning_rate": 0.01}}},
+        "data_handler_config": {"label": ["LABEL0"]}
+    }))
+    
+    # 6. Mock rolling status (lines 152, 337-346)
+    latest_train = ws / "latest_train_records.json"
+    latest_train.write_text(json.dumps({
+        "models": {
+            "model_flat": "r2",
+            "model_flat@rolling": "r2_new"
+        }
+    }))
+    
+    ctx = MagicMock()
+    ctx.model_performance_files = [
+        str(f_invalid_date), str(f_invalid_json), 
+        str(f1), str(f2), str(f3)
+    ]
+    ctx.workspace_root = str(ws)
+    ctx.window_label = 'full'
+    
+    findings = agent.analyze(ctx)
+    
+    # Assertions
+    titles = [f.title for f in findings.findings]
+    assert any('Negative IC' in t for t in titles)
+    assert any('improving' in t for t in titles)
+    assert any('Retrained' in t for t in titles) # for r2 -> r2_new
+    assert any('Model ranking summary' in t for t in titles) # top/bottom
+    
+    # Check retrains
+    retrain_events = findings.raw_metrics.get('retrain_events', [])
+    retrained_models = [e['model'] for e in retrain_events]
+    assert 'model_flat' in retrained_models
+    assert 'model_top' not in retrained_models # filtered out because mode=predict_only
+    
+    # Check stale models
+    stale = findings.raw_metrics.get('stale_models', {})
+    assert 'model_stable' in stale # stable trend but ic_mean < 0.02
+    
+    # check rolling
+    assert findings.raw_metrics.get('rolling_status') == 'active'
+    
+    # Check hyperparams
+    hp = findings.raw_metrics.get('hyperparams', {})
+    assert 'm1' in hp
+    assert hp['m1']['learning_rate'] == 0.01
+    assert hp['m1']['label'] == 'LABEL0'
+
+def test_model_health_agent_not_active(tmp_path):
+    from quantpits.scripts.deep_analysis.agents.model_health import ModelHealthAgent
+    agent = ModelHealthAgent()
+    ws = tmp_path / "ws2"
+    ws.mkdir()
+    latest_train = ws / "latest_train_records.json"
+    latest_train.write_text(json.dumps({
+        "models": {
+            "model_flat": "r2"
+        }
+    }))
+    
+    # Need a dummy performance file so it doesn't exit early
+    f1 = ws / "model_performance_2026-01-02.json"
+    f1.write_text(json.dumps({
+        "model_flat": {"IC_Mean": 0.05, "ICIR": 0.5, "record_id": "r2"}
+    }))
+    
+    ctx = MagicMock()
+    ctx.workspace_root = str(ws)
+    ctx.model_performance_files = [str(f1)]
+    ctx.window_label = 'full'
+    
+    findings = agent.analyze(ctx)
+    assert findings.raw_metrics.get('rolling_status') == 'not_active'
+    titles = [f.title for f in findings.findings]
+    assert any('Rolling training not active' in t for t in titles)
+
+def test_ensemble_evolution_agent_comprehensive(mock_analysis_context, tmp_path):
+    from quantpits.scripts.deep_analysis.agents.ensemble_eval import EnsembleEvolutionAgent
+    agent = EnsembleEvolutionAgent()
+    ws = tmp_path / "ws_ensemble"
+    ws.mkdir()
+    
+    # 1. Mock Combo Trends (lines 35, 48, 133, 136-137, 142)
+    # File without date
+    f_no_date = ws / "combo_comparison_invalid.csv"
+    f_no_date.write_text("combo,total_return\nc1,1.0\n")
+    
+    # File with date but invalid csv
+    f_invalid_csv = ws / "combo_comparison_2026-01-01.csv"
+    f_invalid_csv.write_text("invalid,,\n1")
+    
+    # Valid files
+    f_trend1 = ws / "combo_comparison_2026-01-02.csv"
+    f_trend1.write_text("combo,total_return,calmar_ratio\ncombo_deg,1.0,2.0\ncombo_short,1.0,2.0\n,1.0,1.0\n") # empty combo
+    
+    f_trend2 = ws / "combo_comparison_2026-01-03.csv"
+    # combo_deg calmar degrades < 0.7 * 2.0 (i.e. < 1.4)
+    f_trend2.write_text("combo,total_return,calmar_ratio\ncombo_deg,1.1,1.0\n")
+    
+    mock_analysis_context.combo_comparison_files = [
+        str(f_no_date), str(f_invalid_csv), str(f_trend1), str(f_trend2)
+    ]
+    
+    # 2. Mock Fusion Configs for Layer 1 Changes (lines 171, 176, 183, 185-186, 196-198)
+    # No date
+    f_fusion_no_date = ws / "ensemble_fusion_config_c1.json"
+    f_fusion_no_date.write_text("{}")
+    
+    # No combo match (bad regex)
+    f_fusion_bad_name = ws / "fusion_config_2026-01-01.json"
+    f_fusion_bad_name.write_text("{}")
+    
+    # Invalid json
+    f_fusion_invalid = ws / "ensemble_fusion_config_c1_2026-01-01.json"
+    f_fusion_invalid.write_text("{invalid")
+    
+    # Valid dict models
+    f_fusion_v1 = ws / "ensemble_fusion_config_c1_2026-01-02.json"
+    f_fusion_v1.write_text(json.dumps({"selected_models": {"m1": 0.5, "m2": 0.5}}))
+    
+    # Valid list models, composition change (m1, m2) -> (m2, m3)
+    f_fusion_v2 = ws / "ensemble_fusion_config_c1_2026-01-03.json"
+    f_fusion_v2.write_text(json.dumps({"models": ["m2", "m3"]}))
+    
+    mock_analysis_context.ensemble_fusion_config_files = [
+        str(f_fusion_no_date), str(f_fusion_bad_name), str(f_fusion_invalid),
+        str(f_fusion_v1), str(f_fusion_v2)
+    ]
+    
+    # 3. Layer 2 & 3 Snapshots invalid json (lines 218-219)
+    history_dir = ws / "data" / "config_history"
+    history_dir.mkdir(parents=True)
+    snap1 = history_dir / "config_snapshot_2026-01-01.json"
+    snap1.write_text('{"ensemble_config": {}}')
+    snap2 = history_dir / "config_snapshot_2026-01-02.json"
+    snap2.write_text('{invalid')
+    snap3 = history_dir / "config_snapshot_2026-01-03.json"
+    snap3.write_text('{"ensemble_config": {}}')
+    
+    mock_analysis_context.workspace_root = str(ws)
+    
+    # 4. Correlation Drift Exceptions (lines 264, 277-278)
+    corr1 = ws / "correlation_matrix_2026-01-01.csv"
+    corr1.write_text(",m1,m2\nm1,1,0\nm2,0,1")
+    corr2 = ws / "correlation_matrix_2026-01-02.csv"
+    corr2.write_text(",m3,m4\nm3,1,0\nm4,0,1") # no common models
+    corr3 = ws / "correlation_matrix_2026-01-03.csv"
+    corr3.mkdir() # Exception during read_csv (Is a directory)
+    
+    # 5. Leaderboards (lines 296-297, 302)
+    lb_invalid = ws / "leaderboard_2026-01-01.csv"
+    lb_invalid.write_text("invalid")
+    lb1 = ws / "leaderboard_2026-01-02.csv"
+    lb1.write_text("name,annualized_excess\nm1,-0.1\nEnsemble,0.5")
+    lb2 = ws / "leaderboard_2026-01-03.csv"
+    lb2.write_text("name,annualized_excess\nm1,-0.2\n")
+    
+    mock_analysis_context.leaderboard_files = [str(lb_invalid), str(lb1), str(lb2)]
+    
+    # First analyze call to cover standard paths
+    # temporarily swap correlation files to hit no_common_models
+    mock_analysis_context.correlation_matrix_files = [str(corr1), str(corr2)]
+    findings = agent.analyze(mock_analysis_context)
+    
+    # Assertions
+    titles = [f.title for f in findings.findings]
+    assert any('combo_deg' in t for t in titles) # calmar degraded
+    
+    events = findings.raw_metrics.get('change_events', [])
+    comp_changes = [e for e in events if e['type'] == 'composition_change']
+    assert len(comp_changes) > 0
+    assert comp_changes[0]['old_models'] == ['m1', 'm2']
+    assert comp_changes[0]['new_models'] == ['m2', 'm3']
+    
+    # Consistently negative
+    assert 'm1' in findings.raw_metrics.get('model_contributions', {}).get('consistently_negative', [])
+    assert any('Consistently negative' in t for t in titles)
+    
+    # Second analyze call to hit corr drift exception & defensive else (lines 85-86)
+    mock_analysis_context.correlation_matrix_files = [str(corr1), str(corr3)]
+    
+    # Patch _detect_changes to return unknown event
+    with patch.object(agent, '_detect_changes', return_value=[{'type': 'unknown', 'detail': 'test'}]):
+        findings2 = agent.analyze(mock_analysis_context)
+        titles2 = [f.title for f in findings2.findings]
+        assert any('unknown' in t for t in titles2)
+        assert findings2.raw_metrics['correlation_drift'].get('error') is not None
+
+def test_ensemble_identify_best_combo_none():
+    from quantpits.scripts.deep_analysis.agents.ensemble_eval import EnsembleEvolutionAgent
+    agent = EnsembleEvolutionAgent()
+    assert agent._identify_best_combo({}) is None
+    assert agent._identify_best_combo({"c1": []}) is None
+
+
