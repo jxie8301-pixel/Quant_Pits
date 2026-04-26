@@ -209,6 +209,17 @@ class ReportGenerator:
                 lines.append(f"- Substitution bias: theoretical={theo*100:.2f}%, "
                            f"realized={real*100:.2f}% (missed buys: {n_missed})")
 
+            fill_rate = af.raw_metrics.get('fill_rate')
+            if fill_rate is not None:
+                cancel_rate = af.raw_metrics.get('cancel_rate', 0)
+                lines.append(f"- Timing: Fill Rate {fill_rate*100:.1f}%, Cancel Rate {cancel_rate*100:.1f}%")
+                
+                lat_mean = af.raw_metrics.get('latency_mean_sec')
+                if lat_mean is not None:
+                    lat_median = af.raw_metrics.get('latency_median_sec', 0)
+                    lat_p90 = af.raw_metrics.get('latency_p90_sec', 0)
+                    lines.append(f"- Latency: Mean {lat_mean:.2f}s, Median {lat_median:.2f}s, P90 {lat_p90:.2f}s")
+
         return "\n".join(lines)
 
     def _section_portfolio(self) -> str:

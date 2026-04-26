@@ -191,12 +191,143 @@ class ExecutionQualityAgent(BaseAgent):
         except Exception as e:
             raw_metrics['substitution_bias_error'] = str(e)
 
-        # --- 4. Execution Timing TODO ---
-        findings.append(self._make_finding(
-            'info', 'Execution timing analysis: TODO',
-            'Execution timing analysis pending granular intraday timestamp data. '
-            'Consider recording precise execution timestamps in future trade logs.',
-            {'status': 'deferred'}
-        ))
+        # --- 4. Execution Timing ---
+        try:
+            import os
+            import pandas as pd
+            order_log_path = os.path.join(ctx.workspace_root, 'data', 'raw_order_log_full.csv')
+            trade_log_path = os.path.join(ctx.workspace_root, 'data', 'raw_trade_log_full.csv')
+            
+            if os.path.exists(order_log_path) and os.path.exists(trade_log_path):
+                # Load data
+                order_df = pd.read_csv(order_log_path)
+                trade_df = pd.read_csv(trade_log_path)
+                
+                # Create datetime strings for filtering
+                order_df['datetime'] = pd.to_datetime(order_df['委托日期'].astype(str) + ' ' + order_df['委托时间'])
+                
+                if '成交日期' in trade_df.columns:
+                    trade_df['datetime'] = pd.to_datetime(trade_df['成交日期'].astype(str) + ' ' + trade_df['成交时间'])
+                elif '日期' in trade_df.columns:
+                    trade_df['datetime'] = pd.to_datetime(trade_df['日期'].astype(str) + ' ' + trade_df['成交时间'])
+                else:
+                    trade_df['datetime'] = pd.to_datetime(trade_df['成交日期'].astype(str) + ' ' + trade_df['成交时间'])
+                    
+                # Filter by window dates
+                if ctx.start_date:
+                    order_df = order_df[order_df['datetime'] >= pd.to_datetime(ctx.start_date)]
+                    trade_df = trade_df[trade_df['datetime'] >= pd.to_datetime(ctx.start_date)]
+                if ctx.end_date:
+                    # Make sure end of day is included by moving to the next day if we are at 00:00:00
+                    order_df = order_df[order_df['datetime'] <= pd.to_datetime(ctx.end_date) + pd.Timedelta(days=1)]
+                    trade_df = trade_df[trade_df['datetime'] <= pd.to_datetime(ctx.end_date) + pd.Timedelta(days=1)]
+                    
+                if not order_df.empty:
+                    # Fill Rate & Cancel Rate
+                    total_order = order_df['委托数量'].sum()
+                    total_fill = order_df['成交数量'].sum()
+                    total_cancel = order_df['撤单数量'].sum()
+                    
+                    fill_rate = float(total_fill / total_order) if total_order > 0 else 0.0
+                    cancel_rate = float(total_cancel / total_order) if total_order > 0 else 0.0
+                    
+                    raw_metrics['fill_rate'] = fill_rate
+                    raw_metrics['cancel_rate'] = cancel_rate
+                    
+                    # Latency Calculation using merge_asof
+                    order_df['dir'] = order_df['交易类别'].apply(lambda x: 'buy' if '买入' in str(x) else ('sell' if '卖出' in str(x) else 'other'))
+                    trade_df['dir'] = trade_df['交易类别'].apply(lambda x: 'buy' if '买入' in str(x) else ('sell' if '卖出' in str(x) else 'other'))
+                    
+                    # Ensure symbol formatting is consistent (as string)
+                    order_df['证券代码'] = order_df['证券代码'].astype(str).str.zfill(6)
+                    trade_df['证券代码'] = trade_df['证券代码'].astype(str).str.zfill(6)
+                    
+                    # Keep only buy/sell
+                    order_df = order_df[order_df['dir'].isin(['buy', 'sell'])].sort_values('datetime')
+                    trade_df = trade_df[trade_df['dir'].isin(['buy', 'sell'])].sort_values('datetime')
+                    
+                    # Filter needed columns
+                    o_sub = order_df[['datetime', '证券代码', 'dir']].rename(columns={'datetime': 'order_time'})
+                    t_sub = trade_df[['datetime', '证券代码', 'dir']].rename(columns={'datetime': 'trade_time'})
+                    
+                    if not o_sub.empty and not t_sub.empty:
+                        # merge each trade to the latest order before it
+                        merged = pd.merge_asof(
+                            t_sub, o_sub,
+                            left_on='trade_time',
+                            right_on='order_time',
+                            by=['证券代码', 'dir'],
+                            direction='backward'
+                        )
+                        
+                        merged['latency'] = (merged['trade_time'] - merged['order_time']).dt.total_seconds()
+                        valid_latency = merged['latency'].dropna()
+                        valid_latency = valid_latency[valid_latency >= 0]
+                        
+                        if not valid_latency.empty:
+                            lat_mean = float(valid_latency.mean())
+                            lat_median = float(valid_latency.median())
+                            lat_p90 = float(valid_latency.quantile(0.9))
+                            
+                            raw_metrics['latency_mean_sec'] = lat_mean
+                            raw_metrics['latency_median_sec'] = lat_median
+                            raw_metrics['latency_p90_sec'] = lat_p90
+                            
+                            timing_detail = (
+                                f"Fill Rate: {fill_rate*100:.1f}% | Cancel Rate: {cancel_rate*100:.1f}%. "
+                                f"Latency: Mean {lat_mean:.2f}s, Median {lat_median:.2f}s, 90th Pct {lat_p90:.2f}s."
+                            )
+                            
+                            findings.append(self._make_finding(
+                                'info', 'Execution timing analysis',
+                                timing_detail,
+                                {
+                                    'fill_rate': fill_rate,
+                                    'cancel_rate': cancel_rate,
+                                    'latency_mean_sec': lat_mean,
+                                    'latency_median_sec': lat_median,
+                                    'latency_p90_sec': lat_p90
+                                }
+                            ))
+                            
+                            if cancel_rate > 0.15:
+                                findings.append(self._make_finding(
+                                    'warning', 'Elevated order cancel rate',
+                                    f"Cancel rate is {cancel_rate*100:.1f}%, indicating excessive order modifications or failures.",
+                                    {'cancel_rate': cancel_rate}
+                                ))
+                                recommendations.append("Order cancel rate is high. Investigate order placement logic or market liquidity issues.")
+                        else:
+                            findings.append(self._make_finding(
+                                'info', 'Execution timing analysis',
+                                f"Fill Rate: {fill_rate*100:.1f}% | Cancel Rate: {cancel_rate*100:.1f}%. (No valid latency data found)",
+                                {'fill_rate': fill_rate, 'cancel_rate': cancel_rate}
+                            ))
+                    else:
+                        findings.append(self._make_finding(
+                            'info', 'Execution timing analysis',
+                            f"Fill Rate: {fill_rate*100:.1f}% | Cancel Rate: {cancel_rate*100:.1f}%. (No valid latency data found)",
+                            {'fill_rate': fill_rate, 'cancel_rate': cancel_rate}
+                        ))
+                else:
+                    findings.append(self._make_finding(
+                        'info', 'Execution timing analysis',
+                        'No order data available in this window.',
+                        {'status': 'no_data'}
+                    ))
+            else:
+                findings.append(self._make_finding(
+                    'info', 'Execution timing analysis',
+                    'Execution timing analysis pending granular intraday timestamp data. '
+                    'Consider recording precise execution timestamps in future trade logs.',
+                    {'status': 'deferred'}
+                ))
+        except Exception as e:
+            raw_metrics['execution_timing_error'] = str(e)
+            findings.append(self._make_finding(
+                'warning', 'Execution timing analysis error',
+                f'Failed to compute execution timing: {e}',
+                {'error': str(e)}
+            ))
 
         return AgentFindings(self.name, ctx.window_label, findings, recommendations, raw_metrics)
