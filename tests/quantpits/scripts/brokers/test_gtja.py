@@ -58,3 +58,33 @@ def test_gtja_adapter_read_exception(capsys):
         assert df.empty
         captured = capsys.readouterr()
         assert "[gtja] Error loading dummy.xlsx" in captured.out
+
+
+def test_gtja_adapter_read_orders_and_trades():
+    adapter = GtjaAdapter()
+    
+    mock_df = pd.DataFrame({
+        "证券代码": ["895", "600309.SH", "1", "999999", "nan", None],
+        "证券名称": ["双汇发展", "万华化学", "平安银行", "其它", "N/A", "N/A"],
+        "无关字段": ["\tTab", "NoTab", " ", "", "", ""]
+    })
+    
+    with patch("pandas.read_excel", return_value=mock_df):
+        # Test read_orders (uses _read_and_filter)
+        df_orders = adapter.read_orders("dummy.xlsx")
+        
+        # Expected: 
+        # 895 -> 000895 (starts with 0, keep)
+        # 600309.SH -> 600309 (starts with 6, keep)
+        # 1 -> 000001 (starts with 0, keep)
+        # 999999 -> 999999 (starts with 9, discard)
+        # nan/None -> discard
+        
+        assert len(df_orders) == 3
+        assert set(df_orders["证券代码"]) == {"000895", "600309", "000001"}
+        assert df_orders["无关字段"].iloc[0] == "Tab" # Tab stripped
+        
+        # Test read_trades (uses same _read_and_filter)
+        df_trades = adapter.read_trades("dummy.xlsx")
+        assert len(df_trades) == 3
+        assert set(df_trades["证券代码"]) == {"000895", "600309", "000001"}

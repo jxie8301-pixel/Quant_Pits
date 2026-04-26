@@ -103,7 +103,7 @@ def test_process_single_day_no_trades(mock_env):
 
     with patch.dict(sys.modules, {'qlib': mock_qlib, 'qlib.data': mock_qlib.data, 'qlib.data.ops': mock_qlib.data.ops}):
         with patch("quantpits.scripts.prod_post_trade.load_trade_file", return_value=pd.DataFrame()):
-            cash_after, holding_after = post_trade.process_single_day(
+            cash_after, holding_after, closing_value = post_trade.process_single_day(
                     current_date_string="2026-03-02",
                     current_cash=current_cash,
                     current_holding=current_holding,
@@ -162,7 +162,7 @@ def test_process_single_day_with_buy_sell(mock_env):
             # We mock SELL_TYPES / BUY_TYPES to match our mock data
             with patch("quantpits.scripts.prod_post_trade.SELL_TYPES", {"卖出"}):
                 with patch("quantpits.scripts.prod_post_trade.BUY_TYPES", {"买入"}):
-                        cash_after, holding_after = post_trade.process_single_day(
+                        cash_after, holding_after, closing_value = post_trade.process_single_day(
                             current_date_string="2026-03-02",
                             current_cash=current_cash,
                             current_holding=current_holding,
@@ -272,7 +272,7 @@ def test_main(mock_save_class, mock_classify, mock_adapter, mock_save, mock_proc
     post_trade, workspace = mock_env
     
     mock_get_dates.return_value = ["2026-03-02"]
-    mock_process.return_value = (Decimal("10000.0"), [])
+    mock_process.return_value = (Decimal("10000.0"), [], 110000.0)
     mock_classify.return_value = pd.DataFrame({"trades": [1]})
     
     import sys
@@ -318,7 +318,7 @@ def test_process_single_day_with_dividend(mock_env):
     with patch.dict(sys.modules, {'qlib': mock_qlib, 'qlib.data': mock_qlib.data, 'qlib.data.ops': mock_qlib.data.ops}):
         with patch("quantpits.scripts.prod_post_trade.load_trade_file", return_value=trade_df):
             with patch("quantpits.scripts.prod_post_trade.INTEREST_TYPES", {"利息归本"}):
-                cash_after, holding_after = post_trade.process_single_day(
+                cash_after, holding_after, closing_value = post_trade.process_single_day(
                     current_date_string="2026-03-02",
                     current_cash=current_cash,
                     current_holding=current_holding,
@@ -368,7 +368,7 @@ def test_process_single_day_with_position_addition(mock_env):
     with patch.dict(sys.modules, {'qlib': mock_qlib, 'qlib.data': mock_qlib.data, 'qlib.data.ops': mock_qlib.data.ops}):
         with patch("quantpits.scripts.prod_post_trade.load_trade_file", return_value=trade_df):
             with patch("quantpits.scripts.prod_post_trade.BUY_TYPES", {"买入"}):
-                cash_after, holding_after = post_trade.process_single_day(
+                cash_after, holding_after, closing_value = post_trade.process_single_day(
                     current_date_string="2026-03-02",
                     current_cash=current_cash,
                     current_holding=current_holding,

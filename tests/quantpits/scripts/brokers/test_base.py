@@ -66,3 +66,10 @@ def test_validate_empty_df():
 def test_adapter_name():
     adapter = MockAdapter()
     assert adapter.name == "mock_broker"
+
+
+def test_base_adapter_defaults():
+    """Default implementations should return empty DataFrames."""
+    adapter = MockAdapter()
+    assert adapter.read_orders("dummy.xlsx").empty
+    assert adapter.read_trades("dummy.xlsx").empty

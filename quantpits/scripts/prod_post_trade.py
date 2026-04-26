@@ -517,7 +517,7 @@ def process_single_day(current_date_string, current_cash, current_holding,
 
     print(f"  Holdings: {len(updated_holding)} positions")
 
-    return cash_after, updated_holding
+    return cash_after, updated_holding, float(daily_sum["收盘价值"].iloc[0])
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +650,7 @@ def main():
         cashflow_today = get_cashflow_for_date(
             cashflow_config, date_str, is_first_day=(i == 0)
         )
-        current_cash, current_holding = process_single_day(
+        current_cash, current_holding, current_closing_value = process_single_day(
             date_str,
             current_cash,
             current_holding,
@@ -690,6 +690,7 @@ def main():
     print(f"Batch processing completed!")
     print(f"Processed {len(trade_dates)} trade dates")
     print(f"Final cash: {current_cash}")
+    print(f"Final closing value: {current_closing_value}")
     print(f"Final holdings: {len(current_holding)} positions")
     print(f"{'='*50}")
 
