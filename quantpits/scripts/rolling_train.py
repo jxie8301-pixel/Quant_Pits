@@ -1274,18 +1274,27 @@ def main():
         print("⚠️  没有匹配的模型")
         return
 
-    # 选择运行模式
-    if args.backtest_only:
-        run_backtest_only(args, targets)
-    elif args.predict_only:
-        run_predict_only(args, targets, rolling_cfg)
-    elif args.cold_start or args.resume or args.merge:
-        run_cold_start(args, targets, rolling_cfg)
-    elif args.retrain_last:
-        # --retrain-last 走日常流程（会检测到被清除的 window 并重训）
-        run_daily(args, targets, rolling_cfg)
-    else:
-        run_daily(args, targets, rolling_cfg)
+    from quantpits.utils.operator_log import OperatorLog
+    with OperatorLog("rolling_train", args=sys.argv[1:]) as oplog:
+        # 选择运行模式
+        if args.backtest_only:
+            run_backtest_only(args, targets)
+        elif args.predict_only:
+            run_predict_only(args, targets, rolling_cfg)
+        elif args.cold_start or args.resume or args.merge:
+            run_cold_start(args, targets, rolling_cfg)
+        elif args.retrain_last:
+            # --retrain-last 走日常流程（会检测到被清除的 window 并重训）
+            run_daily(args, targets, rolling_cfg)
+        else:
+            run_daily(args, targets, rolling_cfg)
+
+        oplog.set_result({
+            "n_targets": len(targets),
+            "cold_start": args.cold_start,
+            "resume": args.resume,
+            "predict_only": args.predict_only
+        })
 
 
 if __name__ == "__main__":

@@ -155,7 +155,14 @@ def diff_snapshots(old: dict, new: dict) -> List[dict]:
     """
     Compare two config snapshots and return a list of change records.
     
-    Each record: {type: 'hyperparam'|'ensemble'|'strategy', key: ..., old: ..., new: ...}
+    Each record: {
+        type: 'hyperparam'|'ensemble'|'strategy'|'ensemble_switch', 
+        key: ..., 
+        old: ..., 
+        new: ...,
+        impact_domain: ...,
+        semantic_label: ...
+    }
     """
     changes = []
 
@@ -168,9 +175,15 @@ def diff_snapshots(old: dict, new: dict) -> List[dict]:
         old_m = old_hp.get(model, {})
         new_m = new_hp.get(model, {})
         if model not in old_hp:
-            changes.append({'type': 'hyperparam', 'key': model, 'change': 'added', 'new': new_m})
+            changes.append({
+                'type': 'hyperparam', 'key': model, 'change': 'added', 
+                'new': new_m, 'impact_domain': 'Architecture', 'semantic_label': 'NewModel'
+            })
         elif model not in new_hp:
-            changes.append({'type': 'hyperparam', 'key': model, 'change': 'removed', 'old': old_m})
+            changes.append({
+                'type': 'hyperparam', 'key': model, 'change': 'removed', 
+                'old': old_m, 'impact_domain': 'Architecture', 'semantic_label': 'ModelDecommission'
+            })
         else:
             # Compare individual params (skip _path)
             skip = {'_path', '_error'}
@@ -178,9 +191,25 @@ def diff_snapshots(old: dict, new: dict) -> List[dict]:
                 ov = old_m.get(k)
                 nv = new_m.get(k)
                 if str(ov) != str(nv):
+                    # Heuristics for semantic labels
+                    domain = 'Hyperparameter'
+                    label = 'Tuning'
+                    if k in ['d_model', 'hidden_size', 'num_layers', 'depth', 'max_depth']:
+                        domain = 'Architecture'
+                        label = 'CapacityAdjustment'
+                    elif k in ['lr', 'learning_rate', 'optimizer', 'n_epochs', 'iterations', 'early_stop']:
+                        label = 'LearningDynamics'
+                    elif k in ['dropout', 'l2_leaf_reg', 'num_leaves']:
+                        label = 'Regularization'
+                    elif k in ['d_feat', 'feature_set', 'label_formula']:
+                        domain = 'Dataset'
+                        label = 'FeatureExpansion' if nv and (not ov or len(str(nv)) > len(str(ov))) else 'FeatureSelection'
+
                     changes.append({
                         'type': 'hyperparam', 'key': f'{model}.{k}',
-                        'old': ov, 'new': nv
+                        'old': ov, 'new': nv,
+                        'impact_domain': domain,
+                        'semantic_label': label
                     })
 
     # 2. Ensemble config changes
@@ -195,9 +224,15 @@ def diff_snapshots(old: dict, new: dict) -> List[dict]:
                 oc = old_combos.get(combo_name)
                 nc = new_combos.get(combo_name)
                 if oc != nc:
+                    label = 'EnsembleSubstitution'
+                    if not oc: label = 'NewEnsemble'
+                    elif not nc: label = 'EnsembleDecommission'
+                    
                     changes.append({
                         'type': 'ensemble', 'key': combo_name,
-                        'old': oc, 'new': nc
+                        'old': oc, 'new': nc,
+                        'impact_domain': 'Ensemble',
+                        'semantic_label': label
                     })
         # Detect default combo switch
         old_default = old_ec.get('default_combo')
@@ -205,17 +240,45 @@ def diff_snapshots(old: dict, new: dict) -> List[dict]:
         if old_default != new_default and (old_default or new_default):
             changes.append({
                 'type': 'ensemble_switch', 'key': 'default_combo',
-                'old': old_default, 'new': new_default
+                'old': old_default, 'new': new_default,
+                'impact_domain': 'Ensemble',
+                'semantic_label': 'DefaultComboSwitch'
             })
 
     # 3. Strategy config changes
-    old_sc = json.dumps(old.get('strategy_config', {}), sort_keys=True)
-    new_sc = json.dumps(new.get('strategy_config', {}), sort_keys=True)
-    if old_sc != new_sc:
+    old_sc_json = json.dumps(old.get('strategy_config', {}), sort_keys=True)
+    new_sc_json = json.dumps(new.get('strategy_config', {}), sort_keys=True)
+    if old_sc_json != new_sc_json:
         changes.append({
             'type': 'strategy',
             'old': old.get('strategy_config'),
-            'new': new.get('strategy_config')
+            'new': new.get('strategy_config'),
+            'impact_domain': 'Strategy',
+            'semantic_label': 'RiskLimitAdjustment' # Default label
         })
 
     return changes
+
+
+def annotate_with_llm_context(
+    change_records: List[dict],
+    reason: str,
+    action_item_id: str = None,
+    critic_score: float = 0.0
+) -> List[dict]:
+    """
+    为一批 change records 附加 LLM 操作来源信息。
+    在 LLM Critic 执行 promote 时调用。
+
+    Args:
+        change_records:  diff_snapshots() 返回的变更列表
+        reason:          本次变更的文字理由
+        action_item_id:  触发此次变更的 ActionItem ID（LLM 操作时填写）
+        critic_score:    Critic Agent 的置信度/质量评分
+    """
+    for record in change_records:
+        record['change_reason'] = reason
+        record['action_item_id'] = action_item_id
+        record['critic_score'] = critic_score
+        record['annotated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return change_records

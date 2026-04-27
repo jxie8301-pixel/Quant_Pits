@@ -482,80 +482,81 @@ def main():
     )
     args = parser.parse_args()
 
-    # 初始化
-    print("=" * 60)
-    print("Brute Force Ensemble - 暴力穷举组合回测")
-    print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
+    from quantpits.utils.operator_log import OperatorLog
+    with OperatorLog("brute_force_ensemble", args=sys.argv[1:]) as oplog:
+        # 初始化
+        print("=" * 60)
+        print("Brute Force Ensemble - 暴力穷举组合回测")
+        print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 60)
 
-    init_qlib()
-    
-    train_records, model_config = load_config(args.record_file)
-    
-    # 确定频率
-    freq = args.freq or model_config.get("freq", "week")
-    args.freq = freq
-    print(f"当前交易频率: {freq}")
-    
-    anchor_date = train_records.get(
-        "anchor_date", datetime.now().strftime("%Y-%m-%d")
-    )
-    top_k = model_config.get("TopK", 22)
-    drop_n = model_config.get("DropN", 3)
-    benchmark = model_config.get("benchmark", "SH000300")
+        init_qlib()
+        
+        train_records, model_config = load_config(args.record_file)
+        
+        # 确定频率
+        freq = args.freq or model_config.get("freq", "week")
+        args.freq = freq
+        print(f"当前交易频率: {freq}")
+        
+        anchor_date = train_records.get(
+            "anchor_date", datetime.now().strftime("%Y-%m-%d")
+        )
+        top_k = model_config.get("TopK", 22)
+        drop_n = model_config.get("DropN", 3)
+        benchmark = model_config.get("benchmark", "SH000300")
 
-    # 构建 RunContext
-    from quantpits.utils.run_context import RunContext
-    ctx = RunContext(
-        base_dir=args.output_dir,
-        script_name="brute_force",
-        anchor_date=anchor_date,
-    )
-    ctx.ensure_dirs()
-    print(f"输出目录: {ctx.run_dir}")
+        # 构建 RunContext
+        from quantpits.utils.run_context import RunContext
+        ctx = RunContext(
+            base_dir=args.output_dir,
+            script_name="brute_force",
+            anchor_date=anchor_date,
+        )
+        ctx.ensure_dirs()
+        print(f"输出目录: {ctx.run_dir}")
 
-    # Stage 1: 加载预测数据 (应用 training-mode 过滤)
-    if getattr(args, 'training_mode', None):
-        from quantpits.utils.train_utils import filter_models_by_mode
-        filtered = filter_models_by_mode(train_records.get('models', {}), args.training_mode)
-        train_records = dict(train_records)
-        train_records['models'] = filtered
-        print(f"训练模式过滤: {args.training_mode} (剩余 {len(filtered)} 个模型)")
-    norm_df, model_metrics = load_predictions(train_records)
-    
-    # 划分数据集 (IS / OOS)
-    is_norm_df, oos_norm_df = split_is_oos_by_args(norm_df, args)
-    if is_norm_df.empty:
-        print("错误: IS 期无数据！请检查日期参数。")
-        sys.exit(1)
+        # Stage 1: 加载预测数据 (应用 training-mode 过滤)
+        if getattr(args, 'training_mode', None):
+            from quantpits.utils.train_utils import filter_models_by_mode
+            filtered = filter_models_by_mode(train_records.get('models', {}), args.training_mode)
+            train_records = dict(train_records)
+            train_records['models'] = filtered
+            print(f"训练模式过滤: {args.training_mode} (剩余 {len(filtered)} 个模型)")
+        norm_df, model_metrics = load_predictions(train_records)
+        
+        # 划分数据集 (IS / OOS)
+        is_norm_df, oos_norm_df = split_is_oos_by_args(norm_df, args)
+        if is_norm_df.empty:
+            print("错误: IS 期无数据！请检查日期参数。")
+            sys.exit(1)
 
-    # Stage 2: 相关性分析
-    corr_matrix = correlation_analysis(is_norm_df, ctx.is_dir)
+        # Stage 2: 相关性分析
+        corr_matrix = correlation_analysis(is_norm_df, ctx.is_dir)
 
-    # Stage 3: 暴力回测 (基于 IS)
-    results_df = brute_force_backtest(
-        norm_df=is_norm_df,
-        top_k=top_k,
-        drop_n=drop_n,
-        benchmark=benchmark,
-        freq=args.freq,
-        min_combo_size=args.min_combo_size,
-        max_combo_size=args.max_combo_size,
-        output_dir=ctx.is_dir,
-        resume=args.resume,
-        n_jobs=args.n_jobs,
-        use_groups=args.use_groups,
-        group_config=args.group_config,
-        batch_size=args.batch_size,
-    )
+        # Stage 3: 暴力回测 (基于 IS)
+        results_df = brute_force_backtest(
+            norm_df=is_norm_df,
+            top_k=top_k,
+            drop_n=drop_n,
+            benchmark=benchmark,
+            freq=args.freq,
+            min_combo_size=args.min_combo_size,
+            max_combo_size=args.max_combo_size,
+            output_dir=ctx.is_dir,
+            resume=args.resume,
+            n_jobs=args.n_jobs,
+            use_groups=args.use_groups,
+            group_config=args.group_config,
+            batch_size=args.batch_size,
+        )
 
-    # 导出 Metadata
-    metadata_path = ctx.run_path("run_metadata.json")
-    is_dates_all = is_norm_df.index.get_level_values("datetime")
-    oos_dates_all = oos_norm_df.index.get_level_values("datetime")
-    import json
-    with open(metadata_path, "w", encoding="utf-8") as f:
-        json.dump({
+        # 导出 Metadata
+        is_dates_all = is_norm_df.index.get_level_values("datetime")
+        oos_dates_all = oos_norm_df.index.get_level_values("datetime")
+        
+        from quantpits.utils.search_utils import save_run_metadata
+        metadata_path = save_run_metadata(ctx, {
             "anchor_date": anchor_date,
             "script_used": "brute_force_ensemble",
             "freq": args.freq,
@@ -569,15 +570,20 @@ def main():
             "exclude_last_months": args.exclude_last_months,
             "use_groups": args.use_groups,
             "group_config": args.group_config
-        }, f, indent=4)
-    print(f"\n✅ 元数据已保存: {metadata_path}")
-    print(f"请使用以下命令进行分析与 OOS 验证:")
-    print(f"  python quantpits/scripts/analyze_ensembles.py --metadata {metadata_path}")
+        })
+        print(f"请使用以下命令进行分析与 OOS 验证:")
+        print(f"  python quantpits/scripts/analyze_ensembles.py --metadata {metadata_path}")
 
-    print(f"\n{'='*60}")
-    print(f"全部完成！ 耗时结束于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"输出目录: {ctx.run_dir}")
-    print(f"{'='*60}")
+        print(f"\n{'='*60}")
+        print(f"全部完成！ 耗时结束于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"输出目录: {ctx.run_dir}")
+        print(f"{'='*60}")
+
+        oplog.set_result({
+            "n_models": len(norm_df.columns),
+            "n_combinations": len(results_df) if not results_df.empty else 0,
+            "anchor_date": anchor_date
+        })
 
 
 if __name__ == "__main__":
