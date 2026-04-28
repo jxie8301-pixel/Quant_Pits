@@ -644,6 +644,28 @@ def get_models_by_names(model_names, registry=None):
     return result
 
 
+import logging
+import re
+
+class BestScoreCaptureHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.best_score = None
+        self.best_epoch = None
+    
+    def emit(self, record):
+        try:
+            msg = record.getMessage()
+            if "best score" in msg or "best_score" in msg:
+                # 兼容 "best score: 0.063768 @ 7" 或 "best score: -0.994350 @ 8"
+                m = re.search(r"best score[:\s]+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+@\s+(\d+)", msg)
+                if m:
+                    self.best_score = float(m.group(1))
+                    self.best_epoch = int(m.group(2))
+        except Exception:
+            pass
+
+
 # ================= 单模型训练 =================
 def train_single_model(model_name, yaml_file, params, experiment_name, no_pretrain=False):
     """
@@ -700,6 +722,12 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
             # 训练
             # 捕获收敛信息
             evals_result = {}
+            score_handler = BestScoreCaptureHandler()
+            qlib_logger = logging.getLogger("qlib")
+            orig_level = qlib_logger.level
+            qlib_logger.setLevel(logging.INFO) # 确保能捕获 INFO 级别日志
+            qlib_logger.addHandler(score_handler)
+            
             print(f"[{model_name}] Training...")
             t0 = time.time()
             # 传入 evals_result 以捕获训练过程数据
@@ -708,6 +736,9 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
             except TypeError:
                 # 兼容不支持 evals_result 的旧版或特殊模型
                 model.fit(dataset=dataset)
+            finally:
+                qlib_logger.removeHandler(score_handler)
+                qlib_logger.setLevel(orig_level)
             
             duration = time.time() - t0
 
@@ -719,25 +750,36 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
             best_score = None
 
             try:
+                # 3. 获取设定的 epoch 数 (提前获取，供后续比对)
+                model_kwargs = task_config['task'].get('model', {}).get('kwargs', {})
+                configured_epochs = model_kwargs.get('n_epochs') or model_kwargs.get('num_boost_round')
+
                 # 1. 尝试从 evals_result 提取 (最通用)
                 if evals_result:
                     # 找到第一个非空的指标序列
-                    first_key = next(iter(evals_result))
-                    if isinstance(evals_result[first_key], dict):
+                    try:
+                        first_key = next(iter(evals_result))
+                    except StopIteration:
+                        first_key = None
+                        
+                    if first_key and isinstance(evals_result[first_key], dict):
                         # GBDT 结构: {'train': {'l2': [...]}, 'valid': {...}}
                         first_sub_key = next(iter(evals_result[first_key]))
                         history = evals_result[first_key][first_sub_key]
                         actual_epochs = len(history)
                         final_train_loss = float(history[-1]) if history else None
-                    elif isinstance(evals_result[first_key], list):
+                        
+                        if 'valid' in evals_result:
+                            valid_sub_key = next(iter(evals_result['valid']))
+                            valid_history = evals_result['valid'][valid_sub_key]
+                            if valid_history:
+                                best_score = float(min(valid_history))
+                                best_epoch = valid_history.index(best_score)
+
+                    elif first_key and isinstance(evals_result[first_key], list) and len(evals_result[first_key]) > 0:
                         # NN 结构: {'train': [...], 'valid': [...]}
                         actual_epochs = len(evals_result[first_key])
-                        # 注意: NN 模型中 evals_result 存的是 score (通常是 -loss)
-                        # 我们尽量找 train loss
                         if 'train' in evals_result:
-                            # Heuristic to determine if we should minimize or maximize
-                            # Qlib GeneralPTNN and DNNModelPytorch use raw loss (minimize)
-                            # Qlib LSTM/GRU/etc use -loss (maximize)
                             class_name = type(model).__name__.lower()
                             is_minimizing = "general" in class_name or "dnn" in class_name
                             
@@ -748,25 +790,71 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
                                 else:
                                     best_score = float(max(valid_history))
                                 best_epoch = valid_history.index(best_score)
-                            else:
-                                best_score = None
-                                best_epoch = None
 
-                            # 转换 score 为 loss (如果是负值)
                             last_val = evals_result['train'][-1]
                             final_train_loss = float(-last_val if last_val < 0 else last_val)
 
-                # 2. 如果 evals_result 为空，尝试从对象属性提取 (回退方案)
-                if actual_epochs is None:
-                    if hasattr(model, 'fitted_model_') and hasattr(model.fitted_model_, 'best_iteration'):
-                        actual_epochs = model.fitted_model_.best_iteration
-                    elif hasattr(model, 'model') and hasattr(model.model, 'n_epochs_fitted_'):
+                # 2. 如果 evals_result 为空或未正确填充，尝试从对象属性提取
+                if actual_epochs is None or actual_epochs == 0:
+                    # 优先检查 NN 模型的属性 (LSTM/GRU/MLP 等)
+                    if hasattr(model, 'model') and isinstance(getattr(model.model, 'n_epochs_fitted_', None), (int, float)):
                         actual_epochs = model.model.n_epochs_fitted_
-                
-                # 3. 获取设定的 epoch 数
-                model_kwargs = task_config['task'].get('model', {}).get('kwargs', {})
-                configured_epochs = model_kwargs.get('n_epochs') or model_kwargs.get('num_boost_round')
-                
+                    
+                    # GBDT/LightGBM/CatBoost fallbacks
+                    elif hasattr(model, 'fitted_model_') and hasattr(model.fitted_model_, 'best_iteration'):
+                        # Generic GBDT fitted_model_ (used by some Qlib models and tests)
+                        val = model.fitted_model_.best_iteration
+                        if isinstance(val, (int, float)):
+                            actual_epochs = val
+                            best_epoch = val
+                    elif hasattr(model, 'model') and hasattr(model.model, 'best_iteration_'):
+                        # CatBoost
+                        val_count = getattr(model.model, 'tree_count_', None)
+                        if isinstance(val_count, (int, float)):
+                            actual_epochs = val_count
+                        val_best = getattr(model.model, 'best_iteration_', None)
+                        if isinstance(val_best, (int, float)):
+                            best_epoch = val_best
+                        try:
+                            bs = getattr(model.model, 'best_score_', None)
+                            if isinstance(bs, dict) and 'validation' in bs:
+                                best_score = float(list(bs['validation'].values())[0])
+                        except Exception:
+                            pass
+                    elif hasattr(model, 'model') and hasattr(model.model, 'best_iteration'):
+                        # LightGBM
+                        val_curr = getattr(model.model, 'current_iteration', None)
+                        if isinstance(val_curr, (int, float)):
+                            actual_epochs = val_curr
+                        elif hasattr(model.model, 'num_trees'):
+                            try:
+                                actual_epochs = model.model.num_trees()
+                            except: pass
+                        
+                        val_best = getattr(model.model, 'best_iteration', None)
+                        if isinstance(val_best, (int, float)):
+                            best_epoch = val_best
+                            
+                        try:
+                            bs = getattr(model.model, 'best_score', None)
+                            if isinstance(bs, dict) and 'valid_1' in bs:
+                                best_score = float(list(bs['valid_1'].values())[0])
+                            elif isinstance(bs, dict) and 'valid' in bs:
+                                best_score = float(list(bs['valid'].values())[0])
+                        except Exception:
+                            pass
+                    # Sklearn/Linear models
+                    elif 'linear' in model_name.lower():
+                        actual_epochs = None
+                        best_epoch = None
+                        best_score = None
+                        configured_epochs = None
+                    
+                # 3. 使用 Qlib Logger 截获的 best_score 作为最终补充
+                if best_score is None and score_handler.best_score is not None:
+                    best_score = score_handler.best_score
+                    best_epoch = score_handler.best_epoch
+                    
             except Exception as e:
                 print(f"[{model_name}] Warning: Could not capture detailed epoch info: {e}")
 

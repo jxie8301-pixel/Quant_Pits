@@ -240,3 +240,44 @@ def test_convergence_log_failure_does_not_affect_training(mock_env_constants, mo
         result = train_single_model("test_model", str(yaml_file), mock_params, "test_exp")
         assert result['success'] is True
         assert 'convergence' in result['performance']
+
+
+def test_convergence_log_log_capture(mock_env_constants, mock_qlib, mock_params, tmp_path):
+    train_utils, _ = mock_env_constants
+    from quantpits.utils.train_utils import train_single_model
+    mock_init, mock_r, mock_recorder = mock_qlib
+    
+    import logging
+    
+    # Mock Model that logs best score during fit
+    class LoggingModel:
+        def fit(self, **kwargs):
+            logger = logging.getLogger("qlib.ADD")
+            logger.info("bootstrap_fit best score: 0.063768 @ 7")
+        def predict(self, **kwargs):
+            return MagicMock()
+            
+    mock_model = LoggingModel()
+    mock_init.side_effect = [mock_model, MagicMock()] # model, dataset
+    
+    yaml_content = {
+        'task': {
+            'model': {'kwargs': {'n_epochs': 200}},
+            'dataset': {'kwargs': {'segments': {}}}
+        },
+        'data_handler_config': {}
+    }
+    yaml_file = tmp_path / "test.yaml"
+    import yaml
+    with open(yaml_file, 'w') as f:
+        yaml.dump(yaml_content, f)
+        
+    with patch('quantpits.utils.train_utils.ROOT_DIR', str(tmp_path)), \
+         patch('quantpits.utils.train_utils.os.path.exists', return_value=True):
+        
+        result = train_single_model("test_model", str(yaml_file), mock_params, "test_exp")
+        
+        assert result['success'] is True
+        conv = result['performance']['convergence']
+        assert conv['best_score'] == 0.063768
+        assert conv['best_epoch'] == 7
