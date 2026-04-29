@@ -1,0 +1,7 @@
+{
+  "oos_start_date": null,
+  "oos_end_date": null,
+  "exclude_last_years": 0,
+  "exclude_last_months": 0,
+  "description": "Out-of-Sample evaluation parameters for the Critic Agent."
+}

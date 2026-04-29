@@ -7,6 +7,7 @@
 
 import os
 import sys
+import json
 import signal
 import itertools
 import yaml
@@ -251,3 +252,53 @@ def generate_grouped_combinations(groups, min_combo_size=1, max_combo_size=0):
                 all_combinations.append(combo)
 
     return all_combinations
+
+
+# ============================================================================
+# Metadata & Config 
+# ============================================================================
+
+def load_oos_config(workspace_root=None):
+    """
+    加载 OOS 配置 (config/oos_config.json)。
+    
+    优先级:
+    1. workspace_root/config/oos_config.json
+    2. env.ROOT_DIR/config/oos_config.json
+    """
+    from quantpits.utils import env
+    search_dirs = []
+    if workspace_root:
+        search_dirs.append(os.path.join(workspace_root, "config"))
+    search_dirs.append(os.path.join(env.ROOT_DIR, "config"))
+    
+    for d in search_dirs:
+        path = os.path.join(d, "oos_config.json")
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+
+def save_run_metadata(ctx, metadata: dict):
+    """
+    保存运行元数据到 run_metadata.json，自动注入 OOS 配置。
+    
+    Args:
+        ctx: RunContext 实例
+        metadata: 原始元数据字典
+    """
+    # 注入 OOS 配置
+    oos_cfg = load_oos_config()
+    if oos_cfg:
+        metadata["oos_params"] = oos_cfg
+        
+    metadata_path = ctx.run_path("run_metadata.json")
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=4, ensure_ascii=False)
+    
+    print(f"\n✅ 元数据已保存: {metadata_path}")
+    return metadata_path

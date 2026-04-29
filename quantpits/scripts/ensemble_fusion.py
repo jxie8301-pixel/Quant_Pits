@@ -952,82 +952,65 @@ def main():
     args = parser.parse_args()
 
     from quantpits.utils import env
+    from quantpits.utils.operator_log import OperatorLog
     env.safeguard("Ensemble Fusion")
 
     # ---- 验证参数 ----
     if not args.models and not args.from_config and not args.from_config_all and not args.combo:
         parser.error("必须指定 --models、--from-config、--from-config-all 或 --combo")
 
-    # ---- Stage 0: 初始化 ----
-    print(f"\n{'#'*60}")
-    print("# Ensemble Fusion")
-    print(f"# {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'#'*60}")
+    with OperatorLog("ensemble_fusion", args=sys.argv[1:]) as oplog:
+        # ---- Stage 0: 初始化 ----
+        print(f"\n{'#'*60}")
+        print("# Ensemble Fusion")
+        print(f"# {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'#'*60}")
 
-    init_qlib()
-    train_records, model_config, ensemble_config = load_config(args.record_file)
+        init_qlib()
+        train_records, model_config, ensemble_config = load_config(args.record_file)
 
-    # 确定频率
-    if args.freq:
-        args.freq = args.freq
-    else:
-        args.freq = model_config.get('freq', 'week')
-    print(f"当前交易频率: {args.freq}")
+        # 确定频率
+        if args.freq:
+            args.freq = args.freq
+        else:
+            args.freq = model_config.get('freq', 'week')
+        print(f"当前交易频率: {args.freq}")
 
-    anchor_date = train_records.get('anchor_date', datetime.now().strftime('%Y-%m-%d'))
-    experiment_name = train_records['experiment_name']
-    all_models_dict = train_records.get('models', {})
-    # 获取 --training-mode（CLI 级别默认模式）
-    cli_training_mode = getattr(args, 'training_mode', None)
+        anchor_date = train_records.get('anchor_date', datetime.now().strftime('%Y-%m-%d'))
+        experiment_name = train_records['experiment_name']
+        all_models_dict = train_records.get('models', {})
+        # 获取 --training-mode（CLI 级别默认模式）
+        cli_training_mode = getattr(args, 'training_mode', None)
 
-    from quantpits.utils.train_utils import resolve_model_key
+        from quantpits.utils.train_utils import resolve_model_key
 
-    # ---- 确定要运行的 combo 列表 ----
-    combos_to_run = []  # list of (name, models, method, manual_weights_str, is_default)
+        # ---- 确定要运行的 combo 列表 ----
+        combos_to_run = []  # list of (name, models, method, manual_weights_str, is_default)
 
-    if args.models:
-        # 直接指定模型列表模式 — 解析 model@mode key
-        raw_models = [m.strip() for m in args.models.split(',')]
-        selected_models = []
-        for m in raw_models:
-            full_key = resolve_model_key(m, all_models_dict, cli_training_mode)
-            if full_key:
-                selected_models.append(full_key)
-            else:
-                print(f"\nWarning: 模型 '{m}' 不在训练记录中，将被跳过")
-        if not selected_models:
-            print("Error: 没有有效的模型")
-            sys.exit(1)
-        combos_to_run.append((None, selected_models, args.method, args.weights, True))
+        if args.models:
+            # 直接指定模型列表模式 — 解析 model@mode key
+            raw_models = [m.strip() for m in args.models.split(',')]
+            selected_models = []
+            for m in raw_models:
+                full_key = resolve_model_key(m, all_models_dict, cli_training_mode)
+                if full_key:
+                    selected_models.append(full_key)
+                else:
+                    print(f"\nWarning: 模型 '{m}' 不在训练记录中，将被跳过")
+            if not selected_models:
+                print("Error: 没有有效的模型")
+                sys.exit(1)
+            combos_to_run.append((None, selected_models, args.method, args.weights, True))
 
-    elif args.combo:
-        # 运行指定的 combo
-        combos, global_config = parse_ensemble_config(ensemble_config)
-        if args.combo not in combos:
-            print(f"Error: combo '{args.combo}' 不在 ensemble_config.json 中")
-            print(f"可用的 combo: {list(combos.keys())}")
-            sys.exit(1)
-        cfg = combos[args.combo]
-        # combo 级 training_mode > CLI 级
-        combo_mode = cfg.get('training_mode', cli_training_mode)
-        resolved = []
-        for m in cfg['models']:
-            full_key = resolve_model_key(m, all_models_dict, combo_mode)
-            if full_key:
-                resolved.append(full_key)
-            else:
-                print(f"Warning: combo '{args.combo}' 中模型 '{m}' 不在训练记录中")
-        is_def = cfg.get('default', False)
-        combos_to_run.append((args.combo, resolved, cfg.get('method', 'equal'),
-                              None, is_def))
-
-    elif args.from_config_all:
-        # 运行所有 combo
-        combos, global_config = parse_ensemble_config(ensemble_config)
-        if not combos:
-            print("Error: ensemble_config.json 中没有 combos")
-            sys.exit(1)
-        for name, cfg in combos.items():
+        elif args.combo:
+            # 运行指定的 combo
+            combos, global_config = parse_ensemble_config(ensemble_config)
+            if args.combo not in combos:
+                print(f"Error: combo '{args.combo}' 不在 ensemble_config.json 中")
+                print(f"可用的 combo: {list(combos.keys())}")
+                sys.exit(1)
+            cfg = combos[args.combo]
+            # combo 级 training_mode > CLI 级
             combo_mode = cfg.get('training_mode', cli_training_mode)
             resolved = []
             for m in cfg['models']:
@@ -1035,111 +1018,136 @@ def main():
                 if full_key:
                     resolved.append(full_key)
                 else:
-                    print(f"Warning: combo '{name}' 中模型 '{m}' 不在训练记录中")
+                    print(f"Warning: combo '{args.combo}' 中模型 '{m}' 不在训练记录中")
             is_def = cfg.get('default', False)
-            combos_to_run.append((name, resolved, cfg.get('method', 'equal'),
+            combos_to_run.append((args.combo, resolved, cfg.get('method', 'equal'),
                                   None, is_def))
-        print(f"多组合模式: 共 {len(combos_to_run)} 个 combo")
-        for name, models, method, _, is_def in combos_to_run:
-            tag = " [DEFAULT]" if is_def else ""
-            print(f"  {name}{tag}: {models} ({method})")
 
-    else:  # args.from_config
-        # 读取 default combo
-        combos, global_config = parse_ensemble_config(ensemble_config)
-        default_name, default_cfg = get_default_combo(combos)
-        if not default_cfg:
-            print("Error: ensemble_config.json 中没有 default combo")
+        elif args.from_config_all:
+            # 运行所有 combo
+            combos, global_config = parse_ensemble_config(ensemble_config)
+            if not combos:
+                print("Error: ensemble_config.json 中没有 combos")
+                sys.exit(1)
+            for name, cfg in combos.items():
+                combo_mode = cfg.get('training_mode', cli_training_mode)
+                resolved = []
+                for m in cfg['models']:
+                    full_key = resolve_model_key(m, all_models_dict, combo_mode)
+                    if full_key:
+                        resolved.append(full_key)
+                    else:
+                        print(f"Warning: combo '{name}' 中模型 '{m}' 不在训练记录中")
+                is_def = cfg.get('default', False)
+                combos_to_run.append((name, resolved, cfg.get('method', 'equal'),
+                                      None, is_def))
+            print(f"多组合模式: 共 {len(combos_to_run)} 个 combo")
+            for name, models, method, _, is_def in combos_to_run:
+                tag = " [DEFAULT]" if is_def else ""
+                print(f"  {name}{tag}: {models} ({method})")
+
+        else:  # args.from_config
+            # 读取 default combo
+            combos, global_config = parse_ensemble_config(ensemble_config)
+            default_name, default_cfg = get_default_combo(combos)
+            if not default_cfg:
+                print("Error: ensemble_config.json 中没有 default combo")
+                sys.exit(1)
+            # 如果命令行未指定 method，使用 combo 中配置的
+            method = default_cfg.get('method', 'equal')
+            if args.method != 'equal':  # 用户显式指定了 method
+                method = args.method
+            combo_mode = default_cfg.get('training_mode', cli_training_mode)
+            resolved = []
+            for m in default_cfg['models']:
+                full_key = resolve_model_key(m, all_models_dict, combo_mode)
+                if full_key:
+                    resolved.append(full_key)
+                else:
+                    print(f"Warning: default combo 中模型 '{m}' 不在训练记录中")
+            combos_to_run.append((default_name, resolved, method,
+                                  args.weights, True))
+            print(f"从 ensemble_config.json 加载 default combo: {default_name}")
+            print(f"模型: {resolved}")
+            print(f"权重: {method}")
+
+        # ---- 验证所有 combo 的模型（已在上面 resolve 时处理）----
+        all_needed_models = set()
+        for _, models, _, _, _ in combos_to_run:
+            all_needed_models.update(models)
+
+        if not all_needed_models:
+            print("Error: 没有有效的模型")
             sys.exit(1)
-        # 如果命令行未指定 method，使用 combo 中配置的
-        method = default_cfg.get('method', 'equal')
-        if args.method != 'equal':  # 用户显式指定了 method
-            method = args.method
-        combo_mode = default_cfg.get('training_mode', cli_training_mode)
-        resolved = []
-        for m in default_cfg['models']:
-            full_key = resolve_model_key(m, all_models_dict, combo_mode)
-            if full_key:
-                resolved.append(full_key)
-            else:
-                print(f"Warning: default combo 中模型 '{m}' 不在训练记录中")
-        combos_to_run.append((default_name, resolved, method,
-                              args.weights, True))
-        print(f"从 ensemble_config.json 加载 default combo: {default_name}")
-        print(f"模型: {resolved}")
-        print(f"权重: {method}")
 
-    # ---- 验证所有 combo 的模型（已在上面 resolve 时处理）----
-    all_needed_models = set()
-    for _, models, _, _, _ in combos_to_run:
-        all_needed_models.update(models)
+        print(f"\n所有 combo 涉及的模型并集 ({len(all_needed_models)}): {sorted(all_needed_models)}")
 
-    if not all_needed_models:
-        print("Error: 没有有效的模型")
-        sys.exit(1)
-
-    print(f"\n所有 combo 涉及的模型并集 ({len(all_needed_models)}): {sorted(all_needed_models)}")
-
-    # ---- Stage 1: 一次性加载所有模型预测 ----
-    norm_df, model_metrics, loaded_models = load_selected_predictions(
-        train_records, sorted(all_needed_models)
-    )
-
-    # ---- 时间窗口过滤 ----
-    norm_df = filter_norm_df_by_args(norm_df, args)
-    if norm_df.empty:
-        print("Error: 过滤后没有预测数据，请检查日期参数。")
-        sys.exit(1)
-
-    # ---- 逐 combo 运行 Stage 2-8 ----
-    combo_results = []
-    for combo_name, models, method, manual_w, is_default in combos_to_run:
-        # 过滤掉实际未加载成功的模型
-        valid_models = [m for m in models if m in loaded_models]
-        if not valid_models:
-            print(f"\nWarning: combo {combo_name} 没有有效模型，跳过")
-            continue
-
-        result = run_single_combo(
-            combo_name=combo_name,
-            selected_models=valid_models,
-            method=method,
-            manual_weights_str=manual_w,
-            norm_df=norm_df,
-            model_metrics=model_metrics,
-            loaded_models=loaded_models,
-            train_records=train_records,
-            model_config=model_config,
-            ensemble_config=ensemble_config,
-            anchor_date=anchor_date,
-            experiment_name=experiment_name,
-            args=args,
-            is_default=is_default,
+        # ---- Stage 1: 一次性加载所有模型预测 ----
+        norm_df, model_metrics, loaded_models = load_selected_predictions(
+            train_records, sorted(all_needed_models)
         )
-        if result:
-            combo_results.append(result)
 
-    # ---- 多组合对比 ----
-    if len(combo_results) > 1:
-        compare_combos(combo_results, anchor_date, args.output_dir, args.freq)
+        # ---- 时间窗口过滤 ----
+        norm_df = filter_norm_df_by_args(norm_df, args)
+        if norm_df.empty:
+            print("Error: 过滤后没有预测数据，请检查日期参数。")
+            sys.exit(1)
 
-    # ---- 完成 ----
-    print(f"\n{'#'*60}")
-    print("# 完成!")
-    print(f"{'#'*60}")
-    for result in combo_results:
-        default_tag = " [DEFAULT]" if result['is_default'] else ""
-        print(f"组合 {result['name']}{default_tag}: {', '.join(result['models'])}")
-        print(f"  权重模式 : {result['method']}")
-        print(f"  预测文件 : {result['pred_file']}")
-        if result.get('report_df') is not None:
-            from quantpits.utils import strategy
-            bt_config = strategy.get_backtest_config()
-            initial_cash = bt_config['account']
-            final_nav = result['report_df'].iloc[-1]['account']
-            total_return = (final_nav - initial_cash) / initial_cash
-            print(f"  策略收益 : {total_return*100:.2f}%")
-    print(f"输出目录   : {args.output_dir}")
+        # ---- 逐 combo 运行 Stage 2-8 ----
+        combo_results = []
+        for combo_name, models, method, manual_w, is_default in combos_to_run:
+            # 过滤掉实际未加载成功的模型
+            valid_models = [m for m in models if m in loaded_models]
+            if not valid_models:
+                print(f"\nWarning: combo {combo_name} 没有有效模型，跳过")
+                continue
+
+            result = run_single_combo(
+                combo_name=combo_name,
+                selected_models=valid_models,
+                method=method,
+                manual_weights_str=manual_w,
+                norm_df=norm_df,
+                model_metrics=model_metrics,
+                loaded_models=loaded_models,
+                train_records=train_records,
+                model_config=model_config,
+                ensemble_config=ensemble_config,
+                anchor_date=anchor_date,
+                experiment_name=experiment_name,
+                args=args,
+                is_default=is_default,
+            )
+            if result:
+                combo_results.append(result)
+
+        # ---- 多组合对比 ----
+        if len(combo_results) > 1:
+            compare_combos(combo_results, anchor_date, args.output_dir, args.freq)
+
+        # ---- 完成 ----
+        print(f"\n{'#'*60}")
+        print("# 完成!")
+        print(f"{'#'*60}")
+        for result in combo_results:
+            default_tag = " [DEFAULT]" if result['is_default'] else ""
+            print(f"组合 {result['name']}{default_tag}: {', '.join(result['models'])}")
+            print(f"  权重模式 : {result['method']}")
+            print(f"  预测文件 : {result['pred_file']}")
+            if result.get('report_df') is not None:
+                from quantpits.utils import strategy
+                bt_config = strategy.get_backtest_config()
+                initial_cash = bt_config['account']
+                final_nav = result['report_df'].iloc[-1]['account']
+                total_return = (final_nav - initial_cash) / initial_cash
+                print(f"  策略收益 : {total_return*100:.2f}%")
+        print(f"输出目录   : {args.output_dir}")
+
+        oplog.set_result({
+            "anchor_date": anchor_date,
+            "n_combos": len(combo_results),
+            "experiment_name": experiment_name
+        })
 
 
 if __name__ == "__main__":

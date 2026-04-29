@@ -17,6 +17,8 @@ import os
 import json
 import yaml
 import shutil
+import time
+import pandas as pd
 from datetime import datetime, timedelta
 from quantpits.utils.constants import TRADING_DAYS_PER_YEAR, TRADING_WEEKS_PER_YEAR, AVERAGE_CALENDAR_DAYS_PER_YEAR
 
@@ -642,6 +644,42 @@ def get_models_by_names(model_names, registry=None):
     return result
 
 
+import logging
+import re
+
+class BestScoreCaptureHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.best_score = None
+        self.best_epoch = None
+        self.last_epoch = None
+        self.last_train_loss = None
+        self.epoch_early_stopped = False
+
+    def emit(self, record):
+        try:
+            msg = record.getMessage()
+            if "best score" in msg or "best_score" in msg:
+                # 兼容 "best score: 0.063768 @ 7" 或 "best score: -0.994350 @ 8"
+                m = re.search(r"best score[:\s]+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+@\s+(\d+)", msg)
+                if m:
+                    self.best_score = float(m.group(1))
+                    self.best_epoch = int(m.group(2))
+
+            m = re.search(r"Epoch(\d+):", msg)
+            if m:
+                self.last_epoch = int(m.group(1))
+
+            m = re.search(r"\b(?:loss|mse)/train:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", msg)
+            if m:
+                self.last_train_loss = float(m.group(1))
+
+            if "early stop" in msg.lower():
+                self.epoch_early_stopped = True
+        except Exception:
+            pass
+
+
 # ================= 单模型训练 =================
 def train_single_model(model_name, yaml_file, params, experiment_name, no_pretrain=False):
     """
@@ -696,8 +734,171 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
             dataset = init_instance_by_config(dataset_cfg)
             
             # 训练
+            # 捕获收敛信息
+            evals_result = {}
+            score_handler = BestScoreCaptureHandler()
+            qlib_logger = logging.getLogger("qlib")
+            orig_level = qlib_logger.level
+            qlib_logger.setLevel(logging.INFO) # 确保能捕获 INFO 级别日志
+            qlib_logger.addHandler(score_handler)
+            
             print(f"[{model_name}] Training...")
-            model.fit(dataset=dataset)
+            t0 = time.time()
+            # 传入 evals_result 以捕获训练过程数据
+            try:
+                model.fit(dataset=dataset, evals_result=evals_result)
+            except TypeError:
+                # 兼容不支持 evals_result 的旧版或特殊模型
+                model.fit(dataset=dataset)
+            finally:
+                qlib_logger.removeHandler(score_handler)
+                qlib_logger.setLevel(orig_level)
+            
+            duration = time.time() - t0
+
+            # 提取训练统计信息
+            actual_epochs = None
+            configured_epochs = None
+            final_train_loss = None
+            best_epoch = None
+            best_score = None
+
+            try:
+                # 3. 获取设定的 epoch 数 (提前获取，供后续比对)
+                model_kwargs = task_config['task'].get('model', {}).get('kwargs', {})
+                configured_epochs = model_kwargs.get('n_epochs') or model_kwargs.get('num_boost_round')
+
+                # 1. 尝试从 evals_result 提取 (最通用)
+                if evals_result:
+                    # 找到第一个非空的指标序列
+                    try:
+                        first_key = next(iter(evals_result))
+                    except StopIteration:
+                        first_key = None
+                        
+                    if first_key and isinstance(evals_result[first_key], dict):
+                        # GBDT 结构: {'train': {'l2': [...]}, 'valid': {...}}
+                        first_sub_key = next(iter(evals_result[first_key]))
+                        history = evals_result[first_key][first_sub_key]
+                        actual_epochs = len(history)
+                        final_train_loss = float(history[-1]) if history else None
+                        
+                        if 'valid' in evals_result:
+                            valid_sub_key = next(iter(evals_result['valid']))
+                            valid_history = evals_result['valid'][valid_sub_key]
+                            if valid_history:
+                                best_score = float(min(valid_history))
+                                best_epoch = valid_history.index(best_score)
+
+                    elif first_key and isinstance(evals_result[first_key], list) and len(evals_result[first_key]) > 0:
+                        # NN 结构: {'train': [...], 'valid': [...]}
+                        actual_epochs = len(evals_result[first_key])
+                        if 'train' in evals_result:
+                            class_name = type(model).__name__.lower()
+                            is_minimizing = "general" in class_name or "dnn" in class_name
+                            
+                            valid_history = evals_result.get('valid', [])
+                            if valid_history:
+                                if is_minimizing:
+                                    best_score = float(min(valid_history))
+                                else:
+                                    best_score = float(max(valid_history))
+                                best_epoch = valid_history.index(best_score)
+
+                            last_val = evals_result['train'][-1]
+                            final_train_loss = float(-last_val if last_val < 0 else last_val)
+
+                # 2. 如果 evals_result 为空或未正确填充，尝试从对象属性提取
+                if actual_epochs is None or actual_epochs == 0:
+                    # 优先检查 NN 模型的属性 (LSTM/GRU/MLP 等)
+                    if hasattr(model, 'model') and isinstance(getattr(model.model, 'n_epochs_fitted_', None), (int, float)):
+                        actual_epochs = model.model.n_epochs_fitted_
+                    
+                    # GBDT/LightGBM/CatBoost fallbacks
+                    elif hasattr(model, 'fitted_model_') and hasattr(model.fitted_model_, 'best_iteration'):
+                        # Generic GBDT fitted_model_ (used by some Qlib models and tests)
+                        val = model.fitted_model_.best_iteration
+                        if isinstance(val, (int, float)):
+                            actual_epochs = val
+                            best_epoch = val
+                    elif hasattr(model, 'model') and hasattr(model.model, 'best_iteration_'):
+                        # CatBoost
+                        val_count = getattr(model.model, 'tree_count_', None)
+                        if isinstance(val_count, (int, float)):
+                            actual_epochs = val_count
+                        val_best = getattr(model.model, 'best_iteration_', None)
+                        if isinstance(val_best, (int, float)):
+                            best_epoch = val_best
+                        try:
+                            bs = getattr(model.model, 'best_score_', None)
+                            if isinstance(bs, dict) and 'validation' in bs:
+                                best_score = float(list(bs['validation'].values())[0])
+                        except Exception:
+                            pass
+                    elif hasattr(model, 'model') and hasattr(model.model, 'best_iteration'):
+                        # LightGBM
+                        val_curr = getattr(model.model, 'current_iteration', None)
+                        if isinstance(val_curr, (int, float)):
+                            actual_epochs = val_curr
+                        elif hasattr(model.model, 'num_trees'):
+                            try:
+                                actual_epochs = model.model.num_trees()
+                            except: pass
+                        
+                        val_best = getattr(model.model, 'best_iteration', None)
+                        if isinstance(val_best, (int, float)):
+                            best_epoch = val_best
+                            
+                        try:
+                            bs = getattr(model.model, 'best_score', None)
+                            if isinstance(bs, dict) and 'valid_1' in bs:
+                                best_score = float(list(bs['valid_1'].values())[0])
+                            elif isinstance(bs, dict) and 'valid' in bs:
+                                best_score = float(list(bs['valid'].values())[0])
+                        except Exception:
+                            pass
+                    # Sklearn/Linear models
+                    elif 'linear' in model_name.lower():
+                        actual_epochs = None
+                        best_epoch = None
+                        best_score = None
+                        configured_epochs = None
+                    
+                # 3. 使用 Qlib Logger 截获的 best_score/epoch 作为补充
+                if best_score is None and score_handler.best_score is not None:
+                    best_score = score_handler.best_score
+                    best_epoch = score_handler.best_epoch
+
+                # 4. 使用 Logger 截获的 epoch 计数和 loss 作为补充 (如 ADD 等自定义训练循环的模型)
+                if actual_epochs is None and score_handler.last_epoch is not None:
+                    actual_epochs = score_handler.last_epoch + 1
+
+                if final_train_loss is None and score_handler.last_train_loss is not None:
+                    final_train_loss = score_handler.last_train_loss
+
+            except Exception as e:
+                print(f"[{model_name}] Warning: Could not capture detailed epoch info: {e}")
+
+            early_stopped = False
+            if actual_epochs is not None and configured_epochs is not None:
+                early_stopped = actual_epochs < configured_epochs
+            elif score_handler.epoch_early_stopped:
+                early_stopped = True
+
+            convergence_log = {
+                "experiment_name": experiment_name,
+                "record_id": R.get_recorder().info['id'],
+                "anchor_date": params['anchor_date'],
+                "trained_at": datetime.now().isoformat(),
+                "duration_seconds": float(duration),
+                "early_stopped": early_stopped,
+                "actual_epochs": actual_epochs,
+                "configured_epochs": configured_epochs,
+                "best_epoch": best_epoch,
+                "best_score": best_score,
+                "converged": (actual_epochs == configured_epochs) if (actual_epochs is not None and configured_epochs is not None) else None,
+                "final_train_loss": final_train_loss,
+            }
             
             # 预测
             print(f"[{model_name}] Predicting...")
@@ -723,9 +924,10 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
                 r_obj = init_instance_by_config(r_cfg, recorder=recorder)
                 r_obj.generate()
             
-            # 获取模型成绩（IC等）
+            # 获取模型成绩（IC等及回测指标）
             performance = {}
             try:
+                # 1. IC 指标
                 ic_series = recorder.load_object("sig_analysis/ic.pkl")
                 ic_mean = ic_series.mean()
                 ic_std = ic_series.std()
@@ -735,9 +937,50 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
                     "ICIR": float(ic_ir) if ic_ir else None,
                     "record_id": recorder.info['id']
                 }
+
+                # 2. 回测指标 (Ann_Excess, Max_DD)
+                try:
+                    port_analysis = recorder.load_object("portfolio_analysis/port_analysis_1week.pkl")
+                    if isinstance(port_analysis, pd.DataFrame):
+                        # 查找 excess_return_without_cost 组
+                        # 支持 MultiIndex 或单层 Index
+                        if "excess_return_without_cost" in port_analysis.index:
+                            metrics = port_analysis.loc["excess_return_without_cost"]
+                            if isinstance(metrics, pd.DataFrame):
+                                # 如果是多行，取 risk 列
+                                val_col = "risk" if "risk" in metrics.columns else metrics.columns[0]
+                                performance["Ann_Excess"] = float(metrics.loc["annualized_return", val_col])
+                                performance["Max_DD"] = float(metrics.loc["max_drawdown", val_col])
+                                performance["Information_Ratio"] = float(metrics.loc["information_ratio", val_col])
+                            else:
+                                # 只有一行
+                                performance["Ann_Excess"] = float(metrics.get("annualized_return"))
+                                performance["Max_DD"] = float(metrics.get("max_drawdown"))
+                                performance["Information_Ratio"] = float(metrics.get("information_ratio"))
+                except Exception as pa_e:
+                    print(f"[{model_name}] Note: Could not load portfolio analysis (backtest may have been skipped): {pa_e}")
+
             except Exception as e:
                 print(f"[{model_name}] Could not get IC metrics: {e}")
                 performance = {"record_id": recorder.info['id']}
+            
+            # 注入所有指标到 convergence_log (用于 training_history.jsonl)
+            for k, v in performance.items():
+                if k != "convergence":
+                    convergence_log[k] = v
+            
+            performance["convergence"] = convergence_log
+
+            # 追加到 training_history.jsonl
+            try:
+                history_file = os.path.join(ROOT_DIR, 'data', 'training_history.jsonl')
+                os.makedirs(os.path.dirname(history_file), exist_ok=True)
+                history_entry = {"model_name": model_name}
+                history_entry.update(convergence_log)
+                with open(history_file, 'a') as f:
+                    f.write(json.dumps(history_entry) + "\n")
+            except Exception as e:
+                print(f"[{model_name}] Warning: Could not write to training_history.jsonl: {e}")
             
             rid = recorder.info['id']
             print(f"[{model_name}] Finished! Recorder ID: {rid}")

@@ -41,7 +41,7 @@ from quantpits.utils import env
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = env.ROOT_DIR
 sys.path.append(SCRIPT_DIR)
-os.chdir(ROOT_DIR)
+# os.chdir(ROOT_DIR)  # Moved to main() to avoid import-time side effects
 
 
 def parse_args():
@@ -396,6 +396,7 @@ def run_pretrain(args):
 
 
 def main():
+    os.chdir(ROOT_DIR)
     args = parse_args()
 
     # 信息查看类命令
@@ -416,7 +417,15 @@ def main():
         print("   使用 --list 查看可预训练的模型")
         return
 
-    run_pretrain(args)
+    from quantpits.utils.operator_log import OperatorLog
+    with OperatorLog("pretrain", args=sys.argv[1:]) as oplog:
+        run_pretrain(args)
+        # run_pretrain manages its own internal logging, 
+        # but the context manager will capture global success/fail.
+        oplog.set_result({
+            "models": args.models or args.tag or args.for_model,
+            "dry_run": args.dry_run
+        })
 
 
 if __name__ == "__main__":

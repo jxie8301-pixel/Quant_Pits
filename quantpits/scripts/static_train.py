@@ -50,7 +50,7 @@ from quantpits.utils import env
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = env.ROOT_DIR
 sys.path.append(SCRIPT_DIR)
-os.chdir(ROOT_DIR)
+# os.chdir(ROOT_DIR)  # Moved to main() to avoid import-time side effects
 
 DEFAULT_PREDICT_EXPERIMENT = "Prod_Predict"
 
@@ -539,6 +539,7 @@ def show_state():
 
 # ================= 主入口 =================
 def main():
+    os.chdir(ROOT_DIR)
     from quantpits.utils import env as _env
     _env.safeguard("Static Train")
     args = parse_args()
@@ -559,36 +560,43 @@ def main():
         clear_run_state()
         return
 
-    # 判断运行模式
-    if args.full:
-        # 全量模式：忽略模型选择参数
-        run_full_train(args)
-        return
+    from quantpits.utils.operator_log import OperatorLog
+    with OperatorLog("static_train", args=sys.argv[1:]) as oplog:
+        # 判断运行模式
+        if args.full:
+            # 全量模式：忽略模型选择参数
+            run_full_train(args)
+            return
 
-    # 增量模式和 predict-only 都需要模型选择
-    has_selection = any([
-        args.models, args.algorithm, args.dataset,
-        args.market, args.tag, args.all_enabled
-    ])
+        # 增量模式和 predict-only 都需要模型选择
+        has_selection = any([
+            args.models, args.algorithm, args.dataset,
+            args.market, args.tag, args.all_enabled
+        ])
 
-    if not has_selection:
-        print("❌ 请指定要训练/预测的模型")
-        print("   使用 --models, --algorithm, --dataset, --tag, 或 --all-enabled")
-        print("   使用 --full 全量训练所有 enabled 模型")
-        print("   使用 --help 查看完整帮助")
-        print("   使用 --list 查看所有可用模型")
-        return
+        if not has_selection:
+            print("❌ 请指定要训练/预测的模型")
+            print("   使用 --models, --algorithm, --dataset, --tag, 或 --all-enabled")
+            print("   使用 --full 全量训练所有 enabled 模型")
+            print("   使用 --help 查看完整帮助")
+            print("   使用 --list 查看所有可用模型")
+            return
 
-    from quantpits.utils.train_utils import resolve_target_models
-    targets = resolve_target_models(args)
-    if targets is None or not targets:
-        print("⚠️  没有匹配的模型")
-        return
+        from quantpits.utils.train_utils import resolve_target_models
+        targets = resolve_target_models(args)
+        if targets is None or not targets:
+            print("⚠️  没有匹配的模型")
+            return
 
-    if args.predict_only:
-        run_predict_only(args, targets)
-    else:
-        run_incremental_train(args, targets)
+        if args.predict_only:
+            run_predict_only(args, targets)
+        else:
+            run_incremental_train(args, targets)
+
+        oplog.set_result({
+            "n_targets": len(targets),
+            "predict_only": args.predict_only
+        })
 
 
 if __name__ == "__main__":

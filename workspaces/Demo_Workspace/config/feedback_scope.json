@@ -1,0 +1,61 @@
+{
+    "_comment": "反馈范围控制 — 控制 LLM Critic 可以干预哪些环节",
+    "active_scopes": [
+        "hyperparams"
+    ],
+    "available_scopes": {
+        "hyperparams": {
+            "description": "模型超参调整（n_epochs, lr, dropout, hidden_size 等）",
+            "agents": [
+                "model_health"
+            ],
+            "adapters": [
+                "training_adapter"
+            ],
+            "enabled": true,
+            "focus_metrics": [
+                "IC",
+                "Annualized Return",
+                "Max Drawdown"
+            ]
+        },
+        "model_selection": {
+            "description": "模型启用/禁用（model_registry.yaml enabled 字段）",
+            "agents": [
+                "model_health",
+                "prediction_audit"
+            ],
+            "adapters": [
+                "training_adapter"
+            ],
+            "enabled": false
+        },
+        "combo_search": {
+            "description": "触发组合搜索和组合成员更新",
+            "agents": [
+                "ensemble_eval",
+                "portfolio_risk"
+            ],
+            "adapters": [
+                "search_adapter",
+                "fusion_adapter"
+            ],
+            "enabled": false
+        },
+        "strategy_params": {
+            "description": "TopK/DropN/流动性约束调整",
+            "agents": [
+                "execution_quality",
+                "trade_pattern"
+            ],
+            "adapters": [
+                "fusion_adapter"
+            ],
+            "enabled": false
+        }
+    },
+    "_notes": {
+        "active_scopes": "当前激活的反馈范围列表。超出范围的问题仍在报告中标注 [OUT OF SCOPE - REPORT ONLY]",
+        "usage": "第一阶段只开 hyperparams，超参调好后逐步放开 model_selection、combo_search"
+    }
+}

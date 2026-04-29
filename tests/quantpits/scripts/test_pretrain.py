@@ -13,7 +13,13 @@ def setup_path():
     yield
 
 @pytest.fixture
-def mock_pretrain(monkeypatch):
+def mock_pretrain(monkeypatch, tmp_path):
+    # Setup a temp workspace so env.py doesn't raise RuntimeError on reload
+    workspace = tmp_path / "MockWorkspace"
+    workspace.mkdir()
+    monkeypatch.setenv("QLIB_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setattr(sys, 'argv', ['pretrain.py'])
+
     # Mock heavy modules
     mock_qlib = MagicMock()
     mock_qlib_workflow = MagicMock()

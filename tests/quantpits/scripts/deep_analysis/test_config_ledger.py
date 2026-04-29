@@ -36,7 +36,7 @@ def test_diff_snapshots():
     }
     new = {
         'hyperparams': {
-            'm1': {'lr': 0.02, 'depth': 6},
+            'm1': {'lr': 0.02, 'depth': 7},
             'm2': {'lr': 0.1}
         },
         'ensemble_config': {'default_combo': 'c2'}
@@ -44,19 +44,41 @@ def test_diff_snapshots():
     
     changes = diff_snapshots(old, new)
     
-    # lr changed
+    # lr changed (LearningDynamics)
     hp_change = next(c for c in changes if c['key'] == 'm1.lr')
     assert hp_change['old'] == 0.01
     assert hp_change['new'] == 0.02
+    assert hp_change['impact_domain'] == 'Hyperparameter'
+    assert hp_change['semantic_label'] == 'LearningDynamics'
     
-    # m2 added
+    # depth changed (CapacityAdjustment)
+    depth_change = next(c for c in changes if c['key'] == 'm1.depth')
+    assert depth_change['impact_domain'] == 'Architecture'
+    assert depth_change['semantic_label'] == 'CapacityAdjustment'
+    
+    # m2 added (NewModel)
     m2_added = next(c for c in changes if c['key'] == 'm2' and c['change'] == 'added')
     assert m2_added['new']['lr'] == 0.1
+    assert m2_added['impact_domain'] == 'Architecture'
+    assert m2_added['semantic_label'] == 'NewModel'
     
-    # ensemble switch
+    # ensemble switch (DefaultComboSwitch)
     ens_switch = next(c for c in changes if c['type'] == 'ensemble_switch')
     assert ens_switch['old'] == 'c1'
     assert ens_switch['new'] == 'c2'
+    assert ens_switch['impact_domain'] == 'Ensemble'
+    assert ens_switch['semantic_label'] == 'DefaultComboSwitch'
+
+def test_annotate_with_llm_context():
+    from quantpits.scripts.deep_analysis.config_ledger import annotate_with_llm_context
+    changes = [{'type': 'hyperparam', 'key': 'm1.lr', 'old': 0.01, 'new': 0.02}]
+    reason = "Improving convergence speed"
+    annotated = annotate_with_llm_context(changes, reason, action_item_id="ai-001", critic_score=0.95)
+    
+    assert annotated[0]['change_reason'] == reason
+    assert annotated[0]['action_item_id'] == "ai-001"
+    assert annotated[0]['critic_score'] == 0.95
+    assert 'annotated_at' in annotated[0]
 
 def test_snapshot_configs(mock_workspace):
     snapshot = snapshot_configs(mock_workspace, snapshot_date="2026-04-20")

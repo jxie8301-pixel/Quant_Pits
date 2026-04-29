@@ -703,7 +703,9 @@ def brute_force_fast_backtest(
 
 def main():
     from quantpits.utils import env
+    from quantpits.utils.operator_log import OperatorLog
     env.safeguard("Brute Force Fast")
+    
     parser = argparse.ArgumentParser(
         description="⚡ 快速向量化暴力穷举组合回测 + 结果分析",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -790,104 +792,103 @@ def main():
         help="单次换手交易费用率 (默认: 0.002 = 双边 0.2%%)",
     )
     args = parser.parse_args()
-
-    # 初始化
-    print("=" * 60)
-    print("⚡ Brute Force Fast - 向量化快速暴力穷举回测")
-    print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
-
-    # GPU 初始化
-    _init_gpu(force_gpu=args.use_gpu, force_no_gpu=args.no_gpu)
-
-    init_qlib()
-
-    # Stage 0: 初始化 & 配置加载
-    train_records, model_config = load_config(args.record_file)
-    anchor_date = train_records.get("anchor_date", "unknown")
     
-    # 确定频率 (优先级: 命令行参数 > model_config > 默认 week)
-    freq = args.freq or model_config.get("freq", "week")
-    args.freq = freq
-    print(f"当前交易频率: {freq}")
-    top_k = model_config.get("TopK", 22)
-    drop_n = model_config.get("DropN", 3)
-    benchmark = model_config.get("benchmark", "SH000300")
+    with OperatorLog("brute_force_fast", args=sys.argv[1:]) as oplog:
+        # 初始化
+        print("=" * 60)
+        print("⚡ Brute Force Fast - 向量化快速暴力穷举回测")
+        print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 60)
 
-    # 构建 RunContext
-    from quantpits.utils.run_context import RunContext
-    ctx = RunContext(
-        base_dir=args.output_dir,
-        script_name="brute_force_fast",
-        anchor_date=anchor_date,
-    )
-    ctx.ensure_dirs()
-    print(f"输出目录: {ctx.run_dir}")
+        # GPU 初始化
+        _init_gpu(force_gpu=args.use_gpu, force_no_gpu=args.no_gpu)
 
-    # Stage 1: 加载预测数据 (应用 training-mode 过滤)
-    if getattr(args, 'training_mode', None):
-        from quantpits.utils.train_utils import filter_models_by_mode
-        filtered = filter_models_by_mode(train_records.get('models', {}), args.training_mode)
-        train_records = dict(train_records)
-        train_records['models'] = filtered
-        print(f"训练模式过滤: {args.training_mode} (剩余 {len(filtered)} 个模型)")
-    norm_df, model_metrics = load_predictions(train_records)
+        init_qlib()
 
-    # 划分数据集 (IS / OOS)
-    is_norm_df, oos_norm_df = split_is_oos_by_args(norm_df, args)
-    if is_norm_df.empty:
-        print("错误: IS 期无数据！请检查日期参数。")
-        sys.exit(1)
+        # Stage 0: 初始化 & 配置加载
+        train_records, model_config = load_config(args.record_file)
+        anchor_date = train_records.get("anchor_date", "unknown")
+        
+        # 确定频率 (优先级: 命令行参数 > model_config > 默认 week)
+        freq = args.freq or model_config.get("freq", "week")
+        args.freq = freq
+        print(f"当前交易频率: {freq}")
+        top_k = model_config.get("TopK", 22)
+        drop_n = model_config.get("DropN", 3)
+        benchmark = model_config.get("benchmark", "SH000300")
 
-    # Stage 2: 相关性分析
-    corr_matrix = correlation_analysis(is_norm_df, ctx.is_dir)
+        # 构建 RunContext
+        from quantpits.utils.run_context import RunContext
+        ctx = RunContext(
+            base_dir=args.output_dir,
+            script_name="brute_force_fast",
+            anchor_date=anchor_date,
+        )
+        ctx.ensure_dirs()
+        print(f"输出目录: {ctx.run_dir}")
 
-    # 确定调仓频率 (周频=5天, 日频=1天)
-    rebalance_freq = 5 if freq == "week" else 1
+        # Stage 1: 加载预测数据 (应用 training-mode 过滤)
+        if getattr(args, 'training_mode', None):
+            from quantpits.utils.train_utils import filter_models_by_mode
+            filtered = filter_models_by_mode(train_records.get('models', {}), args.training_mode)
+            train_records = dict(train_records)
+            train_records['models'] = filtered
+            print(f"训练模式过滤: {args.training_mode} (剩余 {len(filtered)} 个模型)")
+        norm_df, model_metrics = load_predictions(train_records)
 
-    # 加载日频收益率矩阵 (无论 freq 是什么都加载日频，全量加载)
-    returns_wide, bench_returns, common_dates, instruments = load_returns_matrix(
-        norm_df, freq=freq
-    )
+        # 划分数据集 (IS / OOS)
+        is_norm_df, oos_norm_df = split_is_oos_by_args(norm_df, args)
+        if is_norm_df.empty:
+            print("错误: IS 期无数据！请检查日期参数。")
+            sys.exit(1)
 
-    # 构建 IS 对齐矩阵
-    is_dates = is_norm_df.index.get_level_values("datetime").unique().sort_values()
-    is_common_dates = is_dates.intersection(returns_wide.index)
-    
-    scores_np, returns_np, model_names, date_index, inst_index = prepare_matrices(
-        is_norm_df, returns_wide, is_common_dates
-    )
+        # Stage 2: 相关性分析
+        corr_matrix = correlation_analysis(is_norm_df, ctx.is_dir)
 
-    # 对齐基准收益 (IS)
-    bench_returns_np = bench_returns.reindex(date_index).fillna(0).values.astype(np.float32)
+        # 确定调仓频率 (周频=5天, 日频=1天)
+        rebalance_freq = 5 if freq == "week" else 1
 
-    # Stage 3: 快速回测
-    results_df = brute_force_fast_backtest(
-        scores_np=scores_np,
-        returns_np=returns_np,
-        model_names=model_names,
-        bench_returns_np=bench_returns_np,
-        top_k=top_k,
-        freq=args.freq,
-        cost_rate=args.cost_rate,
-        batch_size=args.batch_size,
-        min_combo_size=args.min_combo_size,
-        max_combo_size=args.max_combo_size,
-        output_dir=ctx.is_dir,
-        resume=args.resume,
-        rebalance_freq=rebalance_freq,
-        use_groups=args.use_groups,
-        group_config=args.group_config,
-    )
+        # 加载日频收益率矩阵 (无论 freq 是什么都加载日频，全量加载)
+        returns_wide, bench_returns, common_dates, instruments = load_returns_matrix(
+            norm_df, freq=freq
+        )
 
-    # 导出 Metadata
-    metadata_path = ctx.run_path("run_metadata.json")
-    is_dates_all = is_norm_df.index.get_level_values("datetime")
-    oos_dates_all = oos_norm_df.index.get_level_values("datetime")
-    
-    import json
-    with open(metadata_path, "w", encoding="utf-8") as f:
-        json.dump({
+        # 构建 IS 对齐矩阵
+        is_dates = is_norm_df.index.get_level_values("datetime").unique().sort_values()
+        is_common_dates = is_dates.intersection(returns_wide.index)
+        
+        scores_np, returns_np, model_names, date_index, inst_index = prepare_matrices(
+            is_norm_df, returns_wide, is_common_dates
+        )
+
+        # 对齐基准收益 (IS)
+        bench_returns_np = bench_returns.reindex(date_index).fillna(0).values.astype(np.float32)
+
+        # Stage 3: 快速回测
+        results_df = brute_force_fast_backtest(
+            scores_np=scores_np,
+            returns_np=returns_np,
+            model_names=model_names,
+            bench_returns_np=bench_returns_np,
+            top_k=top_k,
+            freq=args.freq,
+            cost_rate=args.cost_rate,
+            batch_size=args.batch_size,
+            min_combo_size=args.min_combo_size,
+            max_combo_size=args.max_combo_size,
+            output_dir=ctx.is_dir,
+            resume=args.resume,
+            rebalance_freq=rebalance_freq,
+            use_groups=args.use_groups,
+            group_config=args.group_config,
+        )
+
+        # 导出 Metadata
+        is_dates_all = is_norm_df.index.get_level_values("datetime")
+        oos_dates_all = oos_norm_df.index.get_level_values("datetime")
+        
+        from quantpits.utils.search_utils import save_run_metadata
+        metadata_path = save_run_metadata(ctx, {
             "anchor_date": anchor_date,
             "script_used": "brute_force_fast",
             "freq": args.freq,
@@ -903,15 +904,20 @@ def main():
             "rebalance_freq": rebalance_freq,
             "use_groups": args.use_groups,
             "group_config": args.group_config
-        }, f, indent=4)
-    print(f"\n✅ 元数据已保存: {metadata_path}")
-    print(f"请使用以下命令进行分析与 OOS 验证:")
-    print(f"  python quantpits/scripts/analyze_ensembles.py --metadata {metadata_path}")
+        })
+        print(f"请使用以下命令进行分析与 OOS 验证:")
+        print(f"  python quantpits/scripts/analyze_ensembles.py --metadata {metadata_path}")
 
-    print(f"\n{'='*60}")
-    print(f"全部完成！ 耗时结束于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"输出目录: {ctx.run_dir}")
-    print(f"{'='*60}")
+        print(f"\n{'='*60}")
+        print(f"全部完成！ 耗时结束于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"输出目录: {ctx.run_dir}")
+        print(f"{'='*60}")
+
+        oplog.set_result({
+            "n_models": len(model_names),
+            "n_combinations": len(results_df) if not results_df.empty else 0,
+            "anchor_date": anchor_date
+        })
 
 
 if __name__ == "__main__":

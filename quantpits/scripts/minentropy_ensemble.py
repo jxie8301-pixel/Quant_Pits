@@ -304,74 +304,75 @@ def main():
     parser.add_argument("--mrmr-candidate-size", type=int, default=10, help="mRMR 每步保留的候选池大小 (默认: 10)")
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("MinEntropy Ensemble - 基于信息论的低冗余高收益组合搜寻 (mRMR)")
-    print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
+    from quantpits.utils.operator_log import OperatorLog
+    with OperatorLog("minentropy_ensemble", args=sys.argv[1:]) as oplog:
+        print("=" * 60)
+        print("MinEntropy Ensemble - 基于信息论的低冗余高收益组合搜寻 (mRMR)")
+        print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 60)
 
-    init_qlib()
-    
-    train_records, model_config = load_config(args.record_file)
-    freq = args.freq or model_config.get("freq", "week")
-    args.freq = freq
-    
-    anchor_date = train_records.get("anchor_date", datetime.now().strftime("%Y-%m-%d"))
-    top_k = model_config.get("TopK", 22)
-    drop_n = model_config.get("DropN", 3)
-    benchmark = model_config.get("benchmark", "SH000300")
+        init_qlib()
+        
+        train_records, model_config = load_config(args.record_file)
+        freq = args.freq or model_config.get("freq", "week")
+        args.freq = freq
+        
+        anchor_date = train_records.get("anchor_date", datetime.now().strftime("%Y-%m-%d"))
+        top_k = model_config.get("TopK", 22)
+        drop_n = model_config.get("DropN", 3)
+        benchmark = model_config.get("benchmark", "SH000300")
 
-    os.makedirs(args.output_dir, exist_ok=True)
+        os.makedirs(args.output_dir, exist_ok=True)
 
-    # 构建 RunContext
-    from quantpits.utils.run_context import RunContext
-    ctx = RunContext(
-        base_dir=args.output_dir,
-        script_name="minentropy",
-        anchor_date=anchor_date,
-    )
-    ctx.ensure_dirs()
-    print(f"输出目录: {ctx.run_dir}")
+        # 构建 RunContext
+        from quantpits.utils.run_context import RunContext
+        ctx = RunContext(
+            base_dir=args.output_dir,
+            script_name="minentropy",
+            anchor_date=anchor_date,
+        )
+        ctx.ensure_dirs()
+        print(f"输出目录: {ctx.run_dir}")
 
-    # Stage 1: 加载预测数据 (应用 training-mode 过滤)
-    if getattr(args, 'training_mode', None):
-        from quantpits.utils.train_utils import filter_models_by_mode
-        filtered = filter_models_by_mode(train_records.get('models', {}), args.training_mode)
-        train_records = dict(train_records)
-        train_records['models'] = filtered
-        print(f"训练模式过滤: {args.training_mode} (剩余 {len(filtered)} 个模型)")
+        # Stage 1: 加载预测数据 (应用 training-mode 过滤)
+        if getattr(args, 'training_mode', None):
+            from quantpits.utils.train_utils import filter_models_by_mode
+            filtered = filter_models_by_mode(train_records.get('models', {}), args.training_mode)
+            train_records = dict(train_records)
+            train_records['models'] = filtered
+            print(f"训练模式过滤: {args.training_mode} (剩余 {len(filtered)} 个模型)")
 
-    norm_df, _ = load_predictions(train_records)
-    if not norm_df.empty:
-        norm_df.index.names = ["datetime", "instrument"]
-    is_norm_df, oos_norm_df = split_is_oos_by_args(norm_df, args)
-    if is_norm_df.empty:
-        print("错误: IS 期无数据！请检查日期参数。")
-        sys.exit(1)
+        norm_df, _ = load_predictions(train_records)
+        if not norm_df.empty:
+            norm_df.index.names = ["datetime", "instrument"]
+        is_norm_df, oos_norm_df = split_is_oos_by_args(norm_df, args)
+        if is_norm_df.empty:
+            print("错误: IS 期无数据！请检查日期参数。")
+            sys.exit(1)
 
-    # 1. 相关性分析 (借用 brute_force 的功能落盘)
-    correlation_analysis(is_norm_df, ctx.is_dir)
+        # 1. 相关性分析 (借用 brute_force 的功能落盘)
+        correlation_analysis(is_norm_df, ctx.is_dir)
 
-    # 2. MinEntropy mRMR 回测
-    results_df = minentropy_backtest(
-        norm_df=is_norm_df,
-        top_k=top_k,
-        drop_n=drop_n,
-        benchmark=benchmark,
-        freq=args.freq,
-        max_combo_size=args.max_combo_size,
-        output_dir=ctx.is_dir,
-        resume=args.resume,
-        n_jobs=args.n_jobs,
-        batch_size=args.batch_size,
-    )
+        # 2. MinEntropy mRMR 回测
+        results_df = minentropy_backtest(
+            norm_df=is_norm_df,
+            top_k=top_k,
+            drop_n=drop_n,
+            benchmark=benchmark,
+            freq=args.freq,
+            max_combo_size=args.max_combo_size,
+            output_dir=ctx.is_dir,
+            resume=args.resume,
+            n_jobs=args.n_jobs,
+            batch_size=args.batch_size,
+        )
 
-    # 3. 导出 Metadata (标记 script_used: minentropy 以便后续处理)
-    metadata_path = ctx.run_path("run_metadata.json")
-    is_dates_all = is_norm_df.index.get_level_values("datetime") if not is_norm_df.empty else pd.Series()
-    oos_dates_all = oos_norm_df.index.get_level_values("datetime") if not oos_norm_df.empty else pd.Series()
-    
-    with open(metadata_path, "w", encoding="utf-8") as f:
-        json.dump({
+        # 3. 导出 Metadata (标记 script_used: minentropy 以便后续处理)
+        is_dates_all = is_norm_df.index.get_level_values("datetime") if not is_norm_df.empty else pd.Series()
+        oos_dates_all = oos_norm_df.index.get_level_values("datetime") if not oos_norm_df.empty else pd.Series()
+        
+        from quantpits.utils.search_utils import save_run_metadata
+        metadata_path = save_run_metadata(ctx, {
             "anchor_date": anchor_date,
             "script_used": "minentropy",
             "freq": args.freq,
@@ -384,10 +385,15 @@ def main():
             "exclude_last_years": args.exclude_last_years,
             "exclude_last_months": args.exclude_last_months,
             "mrmr_candidate_size": args.mrmr_candidate_size,
-        }, f, indent=4)
-    print(f"\n✅ 元数据已保存: {metadata_path}")
-    print(f"请使用以下命令进行分析与 OOS 验证:")
-    print(f"  python quantpits/scripts/analyze_ensembles.py --metadata {metadata_path}")
+        })
+        print(f"请使用以下命令进行分析与 OOS 验证:")
+        print(f"  python quantpits/scripts/analyze_ensembles.py --metadata {metadata_path}")
+
+        oplog.set_result({
+            "n_models": len(is_norm_df.columns) if not is_norm_df.empty else 0,
+            "n_combinations": len(results_df) if not results_df.empty else 0,
+            "anchor_date": anchor_date
+        })
 
 if __name__ == "__main__":
     main()
