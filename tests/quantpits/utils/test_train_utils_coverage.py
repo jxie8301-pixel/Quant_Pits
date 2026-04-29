@@ -373,7 +373,7 @@ def test_train_evals_result_nn_list_structure_minimizing(mock_env_constants, tmp
 
 
 def test_train_evals_result_nn_list_maximizing(mock_env_constants, tmp_path):
-    """Lines 780-795: NN evals_result, maximizing model (no 'general'/'dnn' in name)."""
+    """Lines 780-795: NN evals_result, maximizing model ('return' in class name)."""
     train_utils, _ = mock_env_constants
 
     yaml_file = tmp_path / "test_nn_max.yaml"
@@ -391,8 +391,8 @@ def test_train_evals_result_nn_list_maximizing(mock_env_constants, tmp_path):
     model = MagicMock()
     if hasattr(model, "fitted_model_"):
         del model.fitted_model_
-    # Maximizing model (name doesn't contain general or dnn)
-    type(model).__name__ = "LSTM"
+    # Maximizing model (name contains 'return')
+    type(model).__name__ = "ReturnModel"
 
     evals = {"train": [0.5, 0.4, 0.3], "valid": [0.6, 0.5, 0.55]}
 

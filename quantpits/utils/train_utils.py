@@ -766,7 +766,8 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
             try:
                 # 3. 获取设定的 epoch 数 (提前获取，供后续比对)
                 model_kwargs = task_config['task'].get('model', {}).get('kwargs', {})
-                configured_epochs = model_kwargs.get('n_epochs') or model_kwargs.get('num_boost_round')
+                n_ep = model_kwargs.get('n_epochs')
+                configured_epochs = n_ep if n_ep is not None else model_kwargs.get('num_boost_round')
 
                 # 1. 尝试从 evals_result 提取 (最通用)
                 if evals_result:
@@ -795,14 +796,15 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
                         actual_epochs = len(evals_result[first_key])
                         if 'train' in evals_result:
                             class_name = type(model).__name__.lower()
-                            is_minimizing = "general" in class_name or "dnn" in class_name
+                            # Default to minimizing (MSE/regression); only a few models maximize reward
+                            is_maximizing = "return" in class_name or "reward" in class_name
                             
                             valid_history = evals_result.get('valid', [])
                             if valid_history:
-                                if is_minimizing:
-                                    best_score = float(min(valid_history))
-                                else:
+                                if is_maximizing:
                                     best_score = float(max(valid_history))
+                                else:
+                                    best_score = float(min(valid_history))
                                 best_epoch = valid_history.index(best_score)
 
                             last_val = evals_result['train'][-1]
@@ -811,23 +813,23 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
                 # 2. 如果 evals_result 为空或未正确填充，尝试从对象属性提取
                 if actual_epochs is None or actual_epochs == 0:
                     # 优先检查 NN 模型的属性 (LSTM/GRU/MLP 等)
-                    if hasattr(model, 'model') and isinstance(getattr(model.model, 'n_epochs_fitted_', None), (int, float)):
+                    if hasattr(model, 'model') and isinstance(getattr(model.model, 'n_epochs_fitted_', None), (int, float)) and not isinstance(getattr(model.model, 'n_epochs_fitted_', None), bool):
                         actual_epochs = model.model.n_epochs_fitted_
                     
                     # GBDT/LightGBM/CatBoost fallbacks
                     elif hasattr(model, 'fitted_model_') and hasattr(model.fitted_model_, 'best_iteration'):
                         # Generic GBDT fitted_model_ (used by some Qlib models and tests)
                         val = model.fitted_model_.best_iteration
-                        if isinstance(val, (int, float)):
+                        if isinstance(val, (int, float)) and not isinstance(val, bool):
                             actual_epochs = val
                             best_epoch = val
                     elif hasattr(model, 'model') and hasattr(model.model, 'best_iteration_'):
                         # CatBoost
                         val_count = getattr(model.model, 'tree_count_', None)
-                        if isinstance(val_count, (int, float)):
+                        if isinstance(val_count, (int, float)) and not isinstance(val_count, bool):
                             actual_epochs = val_count
                         val_best = getattr(model.model, 'best_iteration_', None)
-                        if isinstance(val_best, (int, float)):
+                        if isinstance(val_best, (int, float)) and not isinstance(val_best, bool):
                             best_epoch = val_best
                         try:
                             bs = getattr(model.model, 'best_score_', None)
@@ -838,7 +840,7 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
                     elif hasattr(model, 'model') and hasattr(model.model, 'best_iteration'):
                         # LightGBM
                         val_curr = getattr(model.model, 'current_iteration', None)
-                        if isinstance(val_curr, (int, float)):
+                        if isinstance(val_curr, (int, float)) and not isinstance(val_curr, bool):
                             actual_epochs = val_curr
                         elif hasattr(model.model, 'num_trees'):
                             try:
@@ -846,7 +848,7 @@ def train_single_model(model_name, yaml_file, params, experiment_name, no_pretra
                             except: pass
                         
                         val_best = getattr(model.model, 'best_iteration', None)
-                        if isinstance(val_best, (int, float)):
+                        if isinstance(val_best, (int, float)) and not isinstance(val_best, bool):
                             best_epoch = val_best
                             
                         try:
