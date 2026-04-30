@@ -29,12 +29,13 @@ if _workspace_arg:
 elif "QLIB_WORKSPACE_DIR" in os.environ:
     ROOT_DIR = os.path.abspath(os.environ["QLIB_WORKSPACE_DIR"])
 else:
-    raise RuntimeError("Please source a workspace run_env.sh first!")
+    ROOT_DIR = None
 
 # 确保 MLflow 的实验数据 (mlruns) 也隔离存放在当前 Workspace 下
 # 使用绝对路径确保无论从哪里执行，路径都指向正确位置
-mlruns_dir = os.path.abspath(os.path.join(ROOT_DIR, 'mlruns'))
-os.environ["MLFLOW_TRACKING_URI"] = f"file://{mlruns_dir}"
+if ROOT_DIR:
+    mlruns_dir = os.path.abspath(os.path.join(ROOT_DIR, 'mlruns'))
+    os.environ["MLFLOW_TRACKING_URI"] = f"file://{mlruns_dir}"
 
 # Qlib 数据路径：优先环境变量，兜底默认值
 QLIB_DATA_DIR = os.environ.get("QLIB_DATA_DIR", "~/.qlib/qlib_data/cn_data")
