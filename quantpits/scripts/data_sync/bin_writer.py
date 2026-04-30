@@ -148,6 +148,7 @@ class BinWriter:
         dates: list[str],
         values: np.ndarray,
         mode: str = "daily",
+        calendar_index_map: dict[str, int] | None = None,
     ) -> None:
         """
         统一写入入口 — 根据模式选择新建/追加/重写。
@@ -158,11 +159,14 @@ class BinWriter:
             dates: 本次数据对应的交易日期列表
             values: 特征值数组，长度与dates一致
             mode: "full"强制重写，"daily"增量写入
+            calendar_index_map: 可选日期索引映射，传入后可避免O(n)查找
         """
         if len(dates) == 0 or len(values) == 0:
             return
 
-        new_start_index = _find_start_index(dates[0], calendar)
+        new_start_index = _find_start_index(
+            dates[0], calendar, calendar_index_map=calendar_index_map
+        )
         if new_start_index < 0:
             logger.warning(f"日期 {dates[0]} 不在日历中，跳过写入 {file_path}")
             return
@@ -216,17 +220,25 @@ def _trim_trailing_nan(arr: np.ndarray) -> np.ndarray:
     return arr[: last_valid + 1]
 
 
-def _find_start_index(date_str: str, calendar: list[str]) -> int:
+def _find_start_index(
+    date_str: str,
+    calendar: list[str],
+    calendar_index_map: dict[str, int] | None = None,
+) -> int:
     """
     查找日期在日历中的索引。
 
     Args:
         date_str: 日期YYYYMMDD
         calendar: 交易日历列表
+        calendar_index_map: 可选的日期索引映射，传入后可避免O(n)查找
 
     Returns:
         索引位置，未找到返回-1
     """
+    if calendar_index_map is not None:
+        return calendar_index_map.get(date_str, -1)
+
     try:
         return calendar.index(date_str)
     except ValueError:
