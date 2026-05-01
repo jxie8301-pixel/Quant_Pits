@@ -155,6 +155,8 @@ def _load_raw_events(
     interface: str,
     raw_dir: str,
     target_stocks: list[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> pd.DataFrame:
     """
     加载事件接口全量raw数据。
@@ -163,6 +165,8 @@ def _load_raw_events(
         interface: 事件接口名
         raw_dir: raw数据目录
         target_stocks: 指定股票ts_code列表，None时读取全市场
+        start_date: 起始日期YYYYMMDD，None时不限制
+        end_date: 结束日期YYYYMMDD，None时不限制
 
     Returns:
         事件DataFrame
@@ -173,6 +177,10 @@ def _load_raw_events(
 
     dfs: list[pd.DataFrame] = []
     for date_str in all_dates:
+        if start_date and date_str < start_date:
+            continue
+        if end_date and date_str > end_date:
+            continue
         path = os.path.join(raw_dir, interface, f"{date_str}.parquet")
         if not os.path.exists(path):
             continue
@@ -199,6 +207,8 @@ def _build_indicator_daily(
     calendar: list[str],
     valid_codes: list[str],
     target_stocks: list[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> pd.DataFrame:
     """
     从raw事件数据构建indicator型日频DataFrame。
@@ -218,7 +228,9 @@ def _build_indicator_daily(
     Returns:
         DataFrame，索引=[ts_code, trade_date]，列=[bin_field]
     """
-    event_df = _load_raw_events(event_interface, raw_dir, target_stocks)
+    event_df = _load_raw_events(
+        event_interface, raw_dir, target_stocks, start_date=start_date, end_date=end_date
+    )
     if event_df.empty:
         return pd.DataFrame()
 
@@ -260,6 +272,8 @@ def _build_event_day_only_daily(
     calendar: list[str],
     valid_codes: list[str],
     target_stocks: list[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> pd.DataFrame:
     """
     从raw事件数据构建event_day_only型日频DataFrame。
@@ -279,7 +293,9 @@ def _build_event_day_only_daily(
     Returns:
         DataFrame，索引=[ts_code, trade_date]，列=[bin_field]
     """
-    event_df = _load_raw_events(event_interface, raw_dir, target_stocks)
+    event_df = _load_raw_events(
+        event_interface, raw_dir, target_stocks, start_date=start_date, end_date=end_date
+    )
     if event_df.empty:
         return pd.DataFrame()
 
@@ -313,6 +329,8 @@ def _preload_event_bin_fields(
     calendar: list[str],
     valid_codes: list[str],
     target_stocks: list[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> pd.DataFrame:
     """
     构建所有indicator/event_day_only型事件字段的日频DataFrame。
@@ -331,7 +349,7 @@ def _preload_event_bin_fields(
     for cfg in EVENT_INDICATOR_FIELDS:
         df = _build_indicator_daily(
             cfg["event_interface"], cfg["source_field"], cfg["bin_field"],
-            cfg["aggregate"], raw_dir, calendar, valid_codes, target_stocks,
+            cfg["aggregate"], raw_dir, calendar, valid_codes, target_stocks, start_date, end_date,
         )
         if not df.empty:
             parts.append(df)
@@ -340,7 +358,7 @@ def _preload_event_bin_fields(
     for cfg in EVENT_DAY_ONLY_FIELDS:
         df = _build_event_day_only_daily(
             cfg["event_interface"], cfg["source_field"], cfg["bin_field"],
-            cfg["aggregate"], raw_dir, calendar, valid_codes, target_stocks,
+            cfg["aggregate"], raw_dir, calendar, valid_codes, target_stocks, start_date, end_date,
         )
         if not df.empty:
             parts.append(df)
@@ -481,7 +499,14 @@ def generate_bins_per_stock(
 
     merged_daily = _preload_merged_daily(raw_dir, valid_start, valid_end, target_stocks)
 
-    event_bin_fields = _preload_event_bin_fields(raw_dir, index_calendar, valid_codes, target_stocks)
+    event_bin_fields = _preload_event_bin_fields(
+        raw_dir,
+        index_calendar,
+        valid_codes,
+        target_stocks,
+        start_date=valid_start,
+        end_date=valid_end,
+    )
 
     if merged_daily.empty and event_bin_fields.empty:
         report.errors.append("预加载后无可用数据")
@@ -513,6 +538,8 @@ def generate_bins_per_stock(
         shutil.rmtree(feat_dir)
         logger.info(f"full模式：清除已有bin文件 {feat_dir}")
 
+    calendar_index_map = {d: idx for idx, d in enumerate(index_calendar)}
+
     for i, ts_code in enumerate(valid_codes):
         qlib_code = tushare_to_qlib(ts_code)
         if qlib_code is None:
@@ -534,7 +561,14 @@ def generate_bins_per_stock(
                 if len(values) == 0:
                     continue
                 file_path = os.path.join(stock_dir, f"{mapping.bin_field}.day.bin")
-                BinWriter.write_feature_bin(file_path, index_calendar, dates, values, mode)
+                BinWriter.write_feature_bin(
+                    file_path,
+                    index_calendar,
+                    dates,
+                    values,
+                    mode,
+                    calendar_index_map=calendar_index_map,
+                )
 
         except Exception as e:
             logger.warning(f"股票 {ts_code} bin生成失败：{e}")
